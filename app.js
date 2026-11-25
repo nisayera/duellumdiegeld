@@ -228,12 +228,12 @@ function newRound() {
   };
   if (isChips()) {
     act.forEach((p) => { S.r.hand[p.id] = { inRound: 0, total: 0, folded: false, allIn: false }; });
-    putChips(P(sbIdx), sb);
-    putChips(P(bbIdx), bb);
+    fxChips(P(sbIdx).id, 'pot', putChips(P(sbIdx), sb));
+    fxChips(P(bbIdx).id, 'pot', putChips(P(bbIdx), bb));
     S.r.currentBet = Math.max(H(P(sbIdx)).inRound, H(P(bbIdx)).inRound);
   }
   S.screen = 'game';
-  save(); render();
+  save(); renderScene();
   announce();
 }
 
@@ -289,6 +289,7 @@ function act(type, amount) {
   const p = P(idx); const h = H(p);
   snap();
   const toCall = r.currentBet - h.inRound;
+  const before = p.stack;
   if (type === 'fold') {
     h.folded = true;
   } else if (type === 'call') {
@@ -305,6 +306,7 @@ function act(type, amount) {
     }
   }
   if (!r.acted.includes(p.id)) r.acted.push(p.id);
+  fxChips(p.id, 'pot', before - p.stack);
   afterAction(idx);
 }
 
@@ -312,6 +314,7 @@ function finishByFold(winner) {
   const r = S.r;
   const amount = potTotal();
   winner.stack += amount;
+  fxChips('pot', winner.id, amount);
   r.foldWin = { id: winner.id, amount };
   r.result = { ranking: [], pots: [{ amount, winners: [winner.id] }] };
   r.phase = 'result';
@@ -375,7 +378,7 @@ function resolveShowdown() {
       id: p.id, total: H(p).total, live: inHand(p), dist: dist[p.id], order: seatOrder(p)
     })));
     pots = res.pots;
-    Object.entries(res.payout).forEach(([id, v]) => { byId(id).stack += v; });
+    Object.entries(res.payout).forEach(([id, v]) => { byId(id).stack += v; fxChips('pot', id, v); });
   }
   r.result = { ranking, pots, modPot };
   r.phase = 'result';
@@ -406,7 +409,7 @@ function next() {
   r.phase = PHASES[i + 1];
   if (r.phase.startsWith('bet') && isChips()) startBetting(Number(r.phase.slice(3)));
   if (r.phase !== 'question') stopTimer();
-  save(); render();
+  save(); renderScene();
   announce();
   if (r.phase === 'question' && S.settings.timer > 0) startTimer();
 }
@@ -452,9 +455,11 @@ function swapQuestion() {
 function startTimer(sec) {
   stopTimer();
   timer.left = sec || S.settings.timer || 60;
+  timer.total = timer.left;
   timer.int = setInterval(() => {
     timer.left--;
     const el = $('#timer'); if (el) { el.textContent = timer.left; el.classList.toggle('urgent', timer.left <= 10); }
+    const dial = $('.timer-dial'); if (dial) dial.style.setProperty('--p', timer.left / (timer.total || 1));
     if (timer.left <= 5 && timer.left > 0) beep(660, 0.08);
     if (timer.left <= 0) { stopTimer(); beep(440, 0.5, 2); speak('Die Zeit ist um. Stifte weg!'); render(); }
   }, 1000);
@@ -474,7 +479,13 @@ function toast(msg) {
 /* =========================================================
    RENDERING
    ========================================================= */
-function render() {
+// render(): neu zeichnen, Bewegung (fx.js) misst davor und spielt danach.
+// renderScene(): dasselbe als Szenenwechsel, für Phasenwechsel.
+const HAS_FX = typeof FX !== 'undefined';
+function render() { if (HAS_FX) FX.capture(); renderNow(); if (HAS_FX) FX.play(); }
+function renderScene() { if (HAS_FX) FX.transition(render); else render(); }
+const fxChips = (from, to, amount) => { if (HAS_FX && amount > 0) FX.chips(from, to, amount, S && S.r ? S.r.bb : 1); };
+function renderNow() {
   const app = $('#app');
   const prevActive = document.activeElement;
   if (!S || S.screen === 'setup') app.innerHTML = renderSetup();
@@ -490,12 +501,13 @@ function render() {
   }
   if (wasOpen && lastFocus) {
     const back = document.querySelector(lastFocus); lastFocus = null;
-    if (back && !back.disabled) { back.focus({ preventScroll: true }); countUp(); return; }
+    if (back && !back.disabled) { back.focus({ preventScroll: true }); if (!HAS_FX) countUp(); return; }
   }
   const focus = document.querySelector('[data-autofocus]');
   if (focus) focus.focus({ preventScroll: true });
-  countUp();
+  if (!HAS_FX) countUp();
 }
+let lastPhaseKey = '';
 let lastFocus = null; // Selektor des Buttons, der das Modal geöffnet hat
 function focusKey(el) {
   if (!el || !el.dataset || !el.dataset.act) return null;
@@ -528,10 +540,11 @@ function renderSetup() {
   const pr = getPrefs();
   const pool = questionPool(pr.builtin).length;
   const saved = load(LS_STATE, null);
-  const resume = saved && saved.screen === 'game' ? `
+  const hasSaved = saved && saved.screen === 'game';
+  const resume = hasSaved ? `
     <div class="resume">
-      <div><b>Laufendes Spiel gefunden</b><span>Runde ${saved.round}, ${saved.players.length} Spieler, ${saved.settings.mode === 'chips' ? 'digitale Chips' : 'nur Moderator'}</span></div>
-      <button class="btn gold" data-act="resume">Fortsetzen</button>
+      <p><b>Ein Spiel läuft noch.</b> Runde ${saved.round}, ${saved.players.length} Spieler, ${saved.settings.mode === 'chips' ? 'digitale Chips' : 'nur Moderator'}.</p>
+      <button class="btn gold" data-act="resume">Weiterspielen</button>
     </div>` : '';
   const players = pr.players.map((n, i) => `
       <div class="player-row">
@@ -540,18 +553,25 @@ function renderSetup() {
         <button class="icon-btn" title="Entfernen" aria-label="Spieler ${i + 1} entfernen" data-act="rm-player" data-i="${i}" ${pr.players.length <= 2 ? 'disabled' : ''}>${ICON.close}</button>
       </div>`).join('');
   return `
-  <div class="setup">
-    <header class="hero">
-      <div class="hero-text">
-        <h1>Schätz&shy;poker</h1>
-        <p class="tag">Quiz trifft Poker. Wer weiß es? Wer blufft?</p>
-      </div>
-      <figure class="slip hero-slip" aria-hidden="true">
+  <header class="title-card">
+    <div class="spot" aria-hidden="true"></div>
+    <div class="marquee" aria-hidden="true"></div>
+    <div class="tc-inner">
+      <h1 class="tc-title" aria-label="Schätzpoker"><span class="w1">Schätz</span><span class="w2">poker</span></h1>
+      <p class="tag">Quiz trifft Poker. Jeder schreibt eine Zahl auf, dann wird gesetzt, geblufft und aufgedeckt. Am nächsten dran gewinnt den Pot.</p>
+      ${resume}
+      <a class="btn ${hasSaved ? 'ghost' : 'gold'} big tc-cta" href="#einrichten">${hasSaved ? 'Neues Spiel einrichten' : 'Tisch einrichten'}</a>
+    </div>
+    <div class="tc-props" aria-hidden="true">
+      <figure class="slip hero-slip">
         <span class="slip-q">Wie hoch ist der Eiffelturm?</span>
         <span class="slip-line"><span class="slip-est">312</span><span class="slip-unit">Meter</span></span>
       </figure>
-    </header>
-    ${resume}
+      <i class="prop-chip c1"></i><i class="prop-chip c2"></i><i class="prop-chip c3"></i>
+    </div>
+  </header>
+  <div class="setup" id="einrichten">
+    <h2 class="setup-title">Tisch einrichten</h2>
     <section class="panel">
       <h2>Modus</h2>
       <div class="mode-pick">
@@ -615,14 +635,16 @@ function renderGame() {
   const nextUp = r.level < S.settings.schedule.length - 1
     ? (r.nextLevelIn === 1 ? 'steigt nächste Runde' : `steigt in ${r.nextLevelIn} Runden`) : 'Maximum';
   const roundsTxt = S.settings.rounds ? `${S.round} / ${S.settings.rounds}` : S.round;
+  // Auftritts-Animationen nur beim ersten Zeichnen einer Phase, nicht bei jedem Neuzeichnen
+  const phaseKey = S.round + ':' + r.phase; const fresh = phaseKey !== lastPhaseKey; lastPhaseKey = phaseKey;
   return `
-  <div class="game ${isChips() ? 'chips' : 'mod'}">
+  <div class="game ${isChips() ? 'chips' : 'mod'} phase-${r.phase.replace(/\d/, '')} ${fresh ? 'fresh' : ''}">
     <header class="bar">
       <div class="brand">Schätzpoker</div>
-      <div class="board" role="group" aria-label="Spielstand">
+      <div class="board" role="group" aria-label="Spielstand"><i class="bulbs" aria-hidden="true"></i>
         <div class="stat"><small>Runde</small><b>${roundsTxt}</b></div>
         <div class="stat blinds ${r.levelUp && r.phase === 'intro' ? 'flash' : ''}"><small>Blinds, Stufe ${lvl}</small><b>${fmt(r.sb)}/${fmt(r.bb)}</b><em>${nextUp}</em></div>
-        ${isChips() ? `<div class="stat pot"><small>Pot</small><b class="pot-num">${fmt(pot())}</b></div>` : ''}
+        ${isChips() ? `<div class="stat pot"><small>Pot</small><b class="pot-num" data-tween="board-pot" data-value="${pot()}" data-delay="420">${fmt(pot())}</b></div>` : ''}
       </div>
       <nav aria-label="Spielsteuerung">
         <button class="icon-btn" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" data-act="undo" ${history.length ? '' : 'disabled'}>${ICON.undo}</button>
@@ -683,7 +705,7 @@ function stageContent() {
         ${questionBlock(false)}
         <p class="write-note">Jeder schreibt seine Schätzung <b>verdeckt</b> auf.</p>
         <div class="tools">
-          ${timer.int ? `<div class="timer-wrap"><span id="timer" class="timer ${timer.left <= 10 ? 'urgent' : ''}" role="timer" aria-label="Sekunden übrig">${timer.left}</span><button class="btn ghost sm" data-act="timer-stop">Stopp</button></div>`
+          ${timer.int ? `<div class="timer-wrap"><span class="timer-dial" style="--p:${timer.left / (timer.total || timer.left || 1)}" aria-hidden="true"></span><span id="timer" class="timer ${timer.left <= 10 ? 'urgent' : ''}" role="timer" aria-label="Sekunden übrig">${timer.left}</span><button class="btn ghost sm" data-act="timer-stop">Stopp</button></div>`
             : `<button class="btn ghost" data-act="timer-start">Timer starten (${S.settings.timer || 60} s)</button>`}
           <button class="btn ghost" data-act="swap">Andere Frage</button>
         </div>
@@ -828,48 +850,74 @@ function renderResult() {
     else if (rank.length) modLine = `<p class="sub">Der Pot geht an <b>${bestNames.join(' &amp; ')}</b>${bestNames.length > 1 ? ' – wird geteilt' : ''}. <b>${dealer}</b> (Dealer) schiebt ihn rüber.<br><small>War jemand All-in? Dann mit ↶ zurück und den Pot-Rechner nutzen.</small></p>`;
   }
   return `
-    <div class="result">
-      <div class="answer slip">
-        <p class="qtext sm">${esc(q.q)}</p>
-        <small>Die richtige Antwort</small>
-        <b data-count="${Number(q.a)}" data-year="${fmtYear(q, Number(q.a)) !== fmt(Number(q.a)) ? 1 : ''}">${fmtYear(q, Number(q.a))}</b>
-        <span>${esc(q.unit || '')}</span>
+    <div class="result" data-key="${S.round}:${esc(q.id || '')}">
+      <div class="answer-card">
+        <div class="face back" aria-hidden="true"><span>?</span></div>
+        <div class="face answer slip">
+          <p class="qtext sm">${esc(q.q)}</p>
+          <small>Die richtige Antwort</small>
+          <b data-count="${Number(q.a)}" data-year="${fmtYear(q, Number(q.a)) !== fmt(Number(q.a)) ? 1 : ''}">${fmtYear(q, Number(q.a))}</b>
+          <span>${esc(q.unit || '')}</span>
+        </div>
       </div>
       ${q.info ? `<p class="info">${esc(q.info)}</p>` : ''}
       ${r.foldWin ? `<div class="foldwin"><b>${esc(byId(r.foldWin.id).name)}</b> gewinnt <b>${fmt(r.foldWin.amount)}</b> – alle anderen haben gepasst.</div>` : ''}
-      ${rank.length ? `<ol class="ranking">${rank.map((x) => `
-          <li class="${Math.abs(x.dist - bestDist) < 1e-9 ? 'best' : ''}">
+      ${rank.length ? `<ol class="ranking">${rank.map((x, i) => `
+          <li class="${Math.abs(x.dist - bestDist) < 1e-9 ? 'best' : ''}" style="--i:${i}">
             <span class="n">${esc(byId(x.id).name)}</span>
             <span class="e">${fmtYear(q, x.est)}</span>
             <span class="d">${x.dist === 0 ? 'exakt!' : '± ' + fmt(x.dist)}</span>
           </li>`).join('')}</ol>` : ''}
       ${isChips() && !r.foldWin && res.pots.length ? potsHtml(res) : ''}
       ${modLine}
-      ${primary(lastRound ? 'Zur Endwertung' : 'Nächste Runde', 'data-autofocus')}
+      <div class="after">${primary(lastRound ? 'Zur Endwertung' : 'Nächste Runde', 'data-autofocus')}</div>
     </div>`;
 }
 
 function renderTable() {
-  const r = S.r;
+  const r = S.r; const n = S.players.length;
+  // Plätze im Uhrzeigersinn um einen ovalen Tisch, Platz 1 oben
+  const at = (i, kx, ky = kx, off = 0) => {
+    const a = (-90 + (i * 360) / n + off) * Math.PI / 180;
+    return `--x:${(50 + 50 * kx * Math.cos(a)).toFixed(2)}%;--y:${(50 + 50 * ky * Math.sin(a)).toFixed(2)}%`;
+  };
   const rows = S.players.map((p, i) => {
     const h = r.hand[p.id];
-    const marks = [i === S.dealer ? '<i class="m d">D</i>' : '', i === r.sbIdx ? '<i class="m sb">SB</i>' : '', i === r.bbIdx ? '<i class="m bb">BB</i>' : ''].join('');
+    const marks = [i === r.sbIdx ? '<i class="m sb" title="Small Blind">SB</i>' : '', i === r.bbIdx ? '<i class="m bb" title="Big Blind">BB</i>' : ''].join('');
     let status = '';
     if (p.out) status = 'raus';
     else if (h && h.folded) status = 'gepasst';
     else if (h && h.allIn) status = 'all-in';
     const turn = isChips() && r.toAct === i && r.phase.startsWith('bet') && !r.betDone;
+    const bet = isChips() && h && h.inRound && !r.result ? h.inRound : 0;
     return `
-      <li class="${p.out ? 'out' : ''} ${h && h.folded ? 'folded' : ''} ${turn ? 'turn' : ''}">
+      <li class="seat-spot ${p.out ? 'out' : ''} ${h && h.folded ? 'folded' : ''} ${turn ? 'turn' : ''}" style="${at(i, 1)}" data-pid="${p.id}" ${turn ? 'aria-current="true"' : ''}>
+        <span class="seat-anchor" aria-hidden="true"></span>
         <div class="pn"><span class="nm">${esc(p.name)}</span>${marks}</div>
-        ${isChips() && !p.out ? `<div class="pv"><span class="stack">${fmt(p.stack)}</span>${h && h.inRound && !r.result ? `<span class="bet">${fmt(h.inRound)}</span>` : ''}</div>` : ''}
+        ${isChips() && !p.out ? `<div class="pv"><span class="stack" data-tween="stack-${p.id}" data-value="${p.stack}" data-delay="${r.result ? 2600 : 0}">${fmt(p.stack)}</span></div>` : ''}
         ${status ? `<div class="st">${status}</div>` : ''}
-      </li>`;
+        ${i === S.dealer ? '<span class="sr">Dealer</span>' : ''}
+      </li>
+      ${bet ? `<li class="bet-spot" style="${at(i, .5, .7)}" aria-hidden="true"><i class="mini-chip"></i>${fmt(bet)}</li>` : ''}`;
   }).join('');
+  const potNow = pot();
+  const pile = Math.min(12, potNow > 0 ? 2 + Math.ceil(Math.log2(potNow / Math.max(1, r.bb) + 1) * 1.6) : 0);
+  const center = isChips()
+    ? `<div class="felt-center">
+        <div class="pot-pile" aria-hidden="true">${Array.from({ length: pile }, (_, k) => `<i style="--k:${k};--c:${['#e0443e', '#4f7be8', '#f3ead7', '#1f8a5b', '#141016'][(k * 3) % 5]};--dx:${((k * 37) % 7) - 3}px"></i>`).join('')}</div>
+        <small>Pot</small><b data-tween="felt-pot" data-value="${potNow}" data-delay="420">${fmt(potNow)}</b>
+        ${r.currentBet && !r.result ? `<span>Einsatz ${fmt(r.currentBet)}</span>` : '<span>&nbsp;</span>'}
+      </div>`
+    : `<div class="felt-center mod"><small>Sitzordnung</small><span>im Uhrzeigersinn</span></div>`;
+  const turnIdx = isChips() && r.phase.startsWith('bet') && !r.betDone ? r.toAct : -1;
   return `
-    <h3>${isChips() ? 'Tisch' : 'Sitzordnung'}</h3>
-    <ul class="seats">${rows}</ul>
-    ${isChips() ? `<div class="pot-box"><small>Pot</small><b>${fmt(pot())}</b>${r.currentBet ? `<span>aktueller Einsatz ${fmt(r.currentBet)}</span>` : ''}</div>` : ''}`;
+    <h3 class="sr">${isChips() ? 'Tisch' : 'Sitzordnung'}</h3>
+    <div class="felt ${n > 6 ? 'many' : ''}">
+      ${center}
+      ${turnIdx >= 0 ? `<i class="turn-ring" data-flip="turn" style="${at(turnIdx, 1)}" aria-hidden="true"></i>` : ''}
+      <i class="puck" data-flip="dealer" style="${at(S.dealer, .7, .78, 360 / n / 4)}" title="Dealer-Button" aria-hidden="true">D</i>
+      <ul class="seats">${rows}</ul>
+    </div>`;
 }
 
 /* ---------- Endbildschirm ---------- */
