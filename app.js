@@ -40,6 +40,19 @@ let modal = null;      // offenes Modal
 let rulesTab = 'ablauf';
 let timer = { left: 0, int: null };
 
+/* ---------- Icons (inline SVG, erben die Textfarbe) ---------- */
+const svg = (d) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${d}</svg>`;
+const ICON = {
+  undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+  players: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8"/><path d="M18.5 14.2A6.5 6.5 0 0 1 21.5 20"/>'),
+  rules: svg('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/>'),
+  soundOn: svg('<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/>'),
+  soundOff: svg('<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6"/><path d="m22 9-5 6"/>'),
+  full: svg('<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>'),
+  menu: svg('<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>'),
+  close: svg('<path d="M6 6l12 12"/><path d="M18 6 6 18"/>')
+};
+
 /* ---------- Helfer ---------- */
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -452,7 +465,7 @@ function stopTimer() { if (timer.int) clearInterval(timer.int); timer.int = null
 /* ---------- Toast ---------- */
 function toast(msg) {
   const t = document.createElement('div');
-  t.className = 'toast'; t.textContent = msg;
+  t.className = 'toast'; t.setAttribute('role', 'status'); t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.classList.add('show'), 10);
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2800);
@@ -463,12 +476,51 @@ function toast(msg) {
    ========================================================= */
 function render() {
   const app = $('#app');
+  const prevActive = document.activeElement;
   if (!S || S.screen === 'setup') app.innerHTML = renderSetup();
   else if (S.screen === 'end') app.innerHTML = renderEnd();
   else app.innerHTML = renderGame();
+  const wasOpen = !!$('#modal-root').firstElementChild;
   $('#modal-root').innerHTML = modal ? renderModal() : '';
+  document.body.classList.toggle('has-modal', !!modal);
+  if (modal) {
+    if (!wasOpen) lastFocus = focusKey(prevActive);
+    if (!wasOpen || !document.activeElement || document.activeElement === document.body) $('.modal')?.focus({ preventScroll: true });
+    return;
+  }
+  if (wasOpen && lastFocus) {
+    const back = document.querySelector(lastFocus); lastFocus = null;
+    if (back && !back.disabled) { back.focus({ preventScroll: true }); countUp(); return; }
+  }
   const focus = document.querySelector('[data-autofocus]');
-  if (focus && !modal) focus.focus({ preventScroll: true });
+  if (focus) focus.focus({ preventScroll: true });
+  countUp();
+}
+let lastFocus = null; // Selektor des Buttons, der das Modal geöffnet hat
+function focusKey(el) {
+  if (!el || !el.dataset || !el.dataset.act) return null;
+  return `#app [data-act="${el.dataset.act}"]` + (el.dataset.modal ? `[data-modal="${el.dataset.modal}"]` : '');
+}
+let countedKey = '';
+// Einmaliger Moment pro Runde: die Lösung zählt hoch (nicht bei „weniger Bewegung“)
+function countUp() {
+  const el = document.querySelector('.answer b[data-count]');
+  if (!el || !S || !S.r) return;
+  const key = S.round + ':' + (S.r.q.id || S.r.q.q);
+  if (key === countedKey) return;
+  countedKey = key;
+  const target = Number(el.dataset.count); const final = el.textContent;
+  if (!isFinite(target) || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const dec = (String(target).split('.')[1] || '').length;
+  const t0 = performance.now(); const dur = 1100;
+  const step = (t) => {
+    if (!el.isConnected) return;
+    const k = Math.min(1, (t - t0) / dur); const e = 1 - Math.pow(1 - k, 4);
+    const v = target * e;
+    el.textContent = k < 1 ? (el.dataset.year ? String(Math.round(v)) : fmt(Number(v.toFixed(dec)))) : final;
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 /* ---------- Setup ---------- */
@@ -478,30 +530,35 @@ function renderSetup() {
   const saved = load(LS_STATE, null);
   const resume = saved && saved.screen === 'game' ? `
     <div class="resume">
-      <div><b>Laufendes Spiel gefunden</b><span>Runde ${saved.round} · ${saved.players.length} Spieler · ${saved.settings.mode === 'chips' ? 'digitale Chips' : 'nur Moderator'}</span></div>
+      <div><b>Laufendes Spiel gefunden</b><span>Runde ${saved.round}, ${saved.players.length} Spieler, ${saved.settings.mode === 'chips' ? 'digitale Chips' : 'nur Moderator'}</span></div>
       <button class="btn gold" data-act="resume">Fortsetzen</button>
     </div>` : '';
   const players = pr.players.map((n, i) => `
       <div class="player-row">
         <span class="seat">${i + 1}</span>
-        <input type="text" maxlength="18" placeholder="Spieler ${i + 1}" value="${esc(n)}" data-pref-player="${i}">
-        <button class="icon-btn" title="Entfernen" data-act="rm-player" data-i="${i}" ${pr.players.length <= 2 ? 'disabled' : ''}>✕</button>
+        <input type="text" maxlength="18" placeholder="Spieler ${i + 1}" aria-label="Name Spieler ${i + 1}" value="${esc(n)}" data-pref-player="${i}">
+        <button class="icon-btn" title="Entfernen" aria-label="Spieler ${i + 1} entfernen" data-act="rm-player" data-i="${i}" ${pr.players.length <= 2 ? 'disabled' : ''}>${ICON.close}</button>
       </div>`).join('');
   return `
   <div class="setup">
     <header class="hero">
-      <div class="logo-chip">?</div>
-      <h1>Schätz&shy;poker</h1>
-      <p class="tag">Quiz trifft Poker. Wer weiß es? Wer blufft?</p>
+      <div class="hero-text">
+        <h1>Schätz&shy;poker</h1>
+        <p class="tag">Quiz trifft Poker. Wer weiß es? Wer blufft?</p>
+      </div>
+      <figure class="slip hero-slip" aria-hidden="true">
+        <span class="slip-q">Wie hoch ist der Eiffelturm?</span>
+        <span class="slip-line"><span class="slip-est">312</span><span class="slip-unit">Meter</span></span>
+      </figure>
     </header>
     ${resume}
     <section class="panel">
       <h2>Modus</h2>
       <div class="mode-pick">
-        <button class="mode ${pr.mode === 'moderator' ? 'on' : ''}" data-act="mode" data-mode="moderator">
+        <button class="mode ${pr.mode === 'moderator' ? 'on' : ''}" aria-pressed="${pr.mode === 'moderator'}" data-act="mode" data-mode="moderator">
           <b>Nur Moderator</b><span>Ihr spielt mit echten Chips. Die Seite sagt Blinds, Fragen und Hinweise an.</span>
         </button>
-        <button class="mode ${pr.mode === 'chips' ? 'on' : ''}" data-act="mode" data-mode="chips">
+        <button class="mode ${pr.mode === 'chips' ? 'on' : ''}" aria-pressed="${pr.mode === 'chips'}" data-act="mode" data-mode="chips">
           <b>Mit digitalen Chips</b><span>Zusätzlich verwaltet die Seite Stacks, Einsätze und den Pot und verteilt ihn automatisch.</span>
         </button>
       </div>
@@ -540,7 +597,7 @@ function renderSetup() {
       <div id="chip-plan">${chipTable(Number(pr.startStack) || 0, pr.players.length, pr.chips, parseSchedule(pr.schedule))}</div>
     </section>
     <section class="panel row">
-      <div><b>${pool}</b> Fragen im Topf · <b>${getCustom().length}</b> eigene</div>
+      <div class="pool"><b>${pool}</b> Fragen im Topf, davon <b>${getCustom().length}</b> eigene</div>
       <div class="row-btns">
         <button class="btn ghost" data-act="open" data-modal="questions">Fragen verwalten</button>
         <button class="btn ghost" data-act="open" data-modal="rules">Spielregeln</button>
@@ -561,27 +618,29 @@ function renderGame() {
   return `
   <div class="game ${isChips() ? 'chips' : 'mod'}">
     <header class="bar">
-      <div class="brand"><span class="logo-chip sm">?</span>Schätzpoker</div>
-      <div class="stat"><small>Runde</small><b>${roundsTxt}</b></div>
-      <div class="stat blinds ${r.levelUp && r.phase === 'intro' ? 'flash' : ''}"><small>Blinds · Stufe ${lvl}</small><b>${fmt(r.sb)} / ${fmt(r.bb)}</b><em>${nextUp}</em></div>
-      ${isChips() ? `<div class="stat"><small>Pot</small><b class="pot-num">${fmt(pot())}</b></div>` : ''}
-      <nav>
-        <button class="icon-btn" title="Rückgängig" data-act="undo" ${history.length ? '' : 'disabled'}>↶</button>
-        <button class="icon-btn" title="Spieler" data-act="open" data-modal="players">👥</button>
-        <button class="icon-btn" title="Regeln" data-act="open" data-modal="rules">?</button>
-        <button class="icon-btn" title="Sprachausgabe" data-act="tts">${S.settings.tts ? '🔊' : '🔈'}</button>
-        <button class="icon-btn" title="Vollbild" data-act="fullscreen">⛶</button>
-        <button class="icon-btn" title="Menü" data-act="open" data-modal="menu">☰</button>
+      <div class="brand">Schätzpoker</div>
+      <div class="board" role="group" aria-label="Spielstand">
+        <div class="stat"><small>Runde</small><b>${roundsTxt}</b></div>
+        <div class="stat blinds ${r.levelUp && r.phase === 'intro' ? 'flash' : ''}"><small>Blinds, Stufe ${lvl}</small><b>${fmt(r.sb)}/${fmt(r.bb)}</b><em>${nextUp}</em></div>
+        ${isChips() ? `<div class="stat pot"><small>Pot</small><b class="pot-num">${fmt(pot())}</b></div>` : ''}
+      </div>
+      <nav aria-label="Spielsteuerung">
+        <button class="icon-btn" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" data-act="undo" ${history.length ? '' : 'disabled'}>${ICON.undo}</button>
+        <button class="icon-btn" title="Spieler" aria-label="Spieler verwalten" data-act="open" data-modal="players">${ICON.players}</button>
+        <button class="icon-btn" title="Regeln" aria-label="Spielregeln" data-act="open" data-modal="rules">${ICON.rules}</button>
+        <button class="icon-btn" title="Sprachausgabe" aria-label="Sprachausgabe" aria-pressed="${!!S.settings.tts}" data-act="tts">${S.settings.tts ? ICON.soundOn : ICON.soundOff}</button>
+        <button class="icon-btn hide-sm" title="Vollbild" aria-label="Vollbild" data-act="fullscreen">${ICON.full}</button>
+        <button class="icon-btn" title="Menü" aria-label="Menü" data-act="open" data-modal="menu">${ICON.menu}</button>
       </nav>
     </header>
     <main>
       <section class="stage">${renderStage()}</section>
       <aside class="table">${renderTable()}</aside>
     </main>
-    <footer class="steps">${PHASES.map((ph, i) => {
+    <footer class="steps"><ol aria-label="Ablauf der Runde">${PHASES.map((ph, i) => {
       const cur = PHASES.indexOf(r.phase);
-      return `<span class="${i < cur ? 'done' : ''} ${i === cur ? 'cur' : ''}">${PHASE_LABEL[ph]}</span>`;
-    }).join('')}</footer>
+      return `<li class="${i < cur ? 'done' : ''} ${i === cur ? 'cur' : ''}" ${i === cur ? 'aria-current="step"' : ''}>${PHASE_LABEL[ph]}</li>`;
+    }).join('')}</ol></footer>
   </div>`;
 }
 
@@ -591,11 +650,11 @@ function questionBlock(small) {
   if (ph >= PHASES.indexOf('hint1')) hints.push(['1', r.q.h1]);
   if (ph >= PHASES.indexOf('hint2')) hints.push(['2', r.q.h2]);
   return `
-    <div class="qcard ${small ? 'small' : ''}">
-      <div class="qlabel">Frage ${S.round}${r.q.unit ? ` · Antwort in <b>${esc(r.q.unit)}</b>` : ''}</div>
-      <div class="qtext">${esc(r.q.q)}</div>
+    <div class="qcard slip ${small ? 'small' : ''}">
+      <div class="qlabel"><span>Frage ${S.round}</span>${r.q.unit ? `<span>Antwort in <b>${esc(r.q.unit)}</b></span>` : ''}</div>
+      <h2 class="qtext">${esc(r.q.q)}</h2>
     </div>
-    ${hints.length ? `<div class="hints">${hints.map(([n, t]) => `<div class="hint ${r.phase === 'hint' + n ? 'new' : ''}"><span>Hinweis ${n}</span>${esc(t)}</div>`).join('')}</div>` : ''}`;
+    ${hints.length ? `<div class="hints">${hints.map(([n, t]) => `<div class="hint ${r.phase === 'hint' + n ? 'new' : ''}"><span class="hint-n">Hinweis ${n}</span><p>${esc(t)}</p></div>`).join('')}</div>` : ''}`;
 }
 
 function primary(label, extra = '') {
@@ -616,17 +675,17 @@ function stageContent() {
           <div class="kicker">Runde ${S.round}</div>
           <div class="blind-big"><div><small>Small Blind</small><b>${fmt(r.sb)}</b><span>${name(r.sbIdx)}</span></div>
           <div><small>Big Blind</small><b>${fmt(r.bb)}</b><span>${name(r.bbIdx)}</span></div></div>
-          <p class="sub">Dealer-Button: <b>${name(S.dealer)}</b>${isChips() ? ' · Blinds wurden automatisch gesetzt' : ' · Bitte Blinds in die Mitte legen'}</p>
+          <p class="sub">Dealer-Button: <b>${name(S.dealer)}</b>. ${isChips() ? 'Die Blinds wurden automatisch gesetzt.' : 'Bitte die Blinds in die Mitte legen.'}</p>
           ${primary('Frage stellen', 'data-autofocus')}
         </div>`;
     case 'question':
       return `
         ${questionBlock(false)}
-        <div class="write-note">✍️ Jeder schreibt seine Schätzung <b>verdeckt</b> auf.</div>
+        <p class="write-note">Jeder schreibt seine Schätzung <b>verdeckt</b> auf.</p>
         <div class="tools">
-          ${timer.int ? `<div class="timer-wrap"><span id="timer" class="timer ${timer.left <= 10 ? 'urgent' : ''}">${timer.left}</span><button class="btn ghost sm" data-act="timer-stop">Stopp</button></div>`
-            : `<button class="btn ghost" data-act="timer-start">⏱ Timer ${S.settings.timer || 60} s</button>`}
-          <button class="btn ghost" data-act="swap">↻ Andere Frage</button>
+          ${timer.int ? `<div class="timer-wrap"><span id="timer" class="timer ${timer.left <= 10 ? 'urgent' : ''}" role="timer" aria-label="Sekunden übrig">${timer.left}</span><button class="btn ghost sm" data-act="timer-stop">Stopp</button></div>`
+            : `<button class="btn ghost" data-act="timer-start">Timer starten (${S.settings.timer || 60} s)</button>`}
+          <button class="btn ghost" data-act="swap">Andere Frage</button>
         </div>
         ${primary('Setzrunde 1 starten', 'data-autofocus')}`;
     case 'hint1': case 'hint2':
@@ -654,7 +713,7 @@ function helpBox() {
   };
   const key = ph === 'bet0' ? 'bet0' : ph.startsWith('bet') ? 'bet' : ph.startsWith('hint') ? 'hint' : ph;
   if (!T[key]) return '';
-  return `<div class="help"><span>Kurz erklärt</span><p>${T[key]}</p><button class="link" data-act="rules-at" data-tab="${key === 'result' || key === 'showdown' ? 'sidepot' : key.startsWith('bet') ? 'zuege' : 'poker'}">Mehr in den Regeln →</button></div>`;
+  return `<div class="help"><p><b class="help-k">Kurz erklärt:</b> ${T[key]}</p><button class="link" data-act="rules-at" data-tab="${key === 'result' || key === 'showdown' ? 'sidepot' : key.startsWith('bet') ? 'zuege' : 'poker'}">Mehr dazu in den Regeln</button></div>`;
 }
 
 function renderBetting() {
@@ -667,7 +726,7 @@ function renderBetting() {
         <div class="bet-title">Setzrunde ${k} <small>von 3</small></div>
         <p class="sub">Es beginnt <b>${esc(P(first).name)}</b>${k === 1 ? ' (links vom Big Blind)' : ' (links vom Dealer)'}, dann reihum im Uhrzeigersinn.</p>
         <p class="sub small">Einsätze bleiben <b>vor euch</b> liegen. Wenn alle gleich viel gesetzt oder gepasst haben, schiebt <b>${esc(P(S.dealer).name)}</b> (Dealer) alles in die Mitte.</p>
-        ${primary(`Setzrunde beendet → ${nextLabel}`, 'data-autofocus')}
+        ${primary(`Setzrunde beendet, ${nextLabel.charAt(0).toLowerCase() + nextLabel.slice(1)}`, 'data-autofocus')}
       </div>`;
   }
   if (r.betDone) {
@@ -694,7 +753,7 @@ function renderBetting() {
       <div class="bet-title">Setzrunde ${k} <small>von 3</small></div>
       <div class="actor">
         <div class="actor-name">${esc(p.name)} <span>ist am Zug</span></div>
-        <div class="actor-meta">Stack <b>${fmt(p.stack)}</b> · gesetzt <b>${fmt(h.inRound)}</b>${toCall > 0 ? ` · zu zahlen <b>${fmt(toCall)}</b>` : ''}</div>
+        <dl class="actor-meta"><div><dt>Stack</dt><dd>${fmt(p.stack)}</dd></div><div><dt>Gesetzt</dt><dd>${fmt(h.inRound)}</dd></div>${toCall > 0 ? `<div class="due"><dt>Zu zahlen</dt><dd>${fmt(toCall)}</dd></div>` : ''}</dl>
       </div>
       <div class="actions">
         <button class="btn red" data-act="fold">Passen</button>
@@ -728,7 +787,7 @@ function renderShowdown() {
   return `
     ${questionBlock(true)}
     <div class="showdown">
-      <div class="bet-title">Showdown – Schätzungen aufdecken!</div>
+      <div class="bet-title">Showdown: Schätzungen aufdecken</div>
       <p class="sub">${isChips()
         ? 'Tragt die Schätzungen aller Spieler ein, die noch dabei sind.'
         : 'Schätzungen eintragen, dann zeigt die Seite, wer am nächsten dran war. <b>Wer gepasst hat: Feld leer lassen.</b>'}</p>
@@ -739,9 +798,9 @@ function renderShowdown() {
         ${list.map((p, i) => `
           <div class="est">
             <span class="en">${esc(p.name)}</span>
-            <label class="ef"><input type="text" inputmode="decimal" placeholder="Schätzung" value="${val(r.estimates[p.id])}" data-est="${p.id}" ${i === 0 ? 'data-autofocus' : ''}>
+            <label class="ef"><input type="text" inputmode="decimal" placeholder="Schätzung" value="${val(r.estimates[p.id])}" data-est="${p.id}" aria-label="Schätzung von ${esc(p.name)}" ${i === 0 ? 'data-autofocus' : ''}>
               ${r.q.unit ? `<em>${esc(r.q.unit)}</em>` : ''}</label>
-            ${calc ? `<label class="ef bet-in"><input type="text" inputmode="numeric" placeholder="Einsatz gesamt" value="${val(r.contrib[p.id])}" data-contrib="${p.id}"><em>Chips</em></label>` : ''}
+            ${calc ? `<label class="ef bet-in"><input type="text" inputmode="numeric" placeholder="Einsatz gesamt" value="${val(r.contrib[p.id])}" data-contrib="${p.id}" aria-label="Einsatz gesamt von ${esc(p.name)}"><em>Chips</em></label>` : ''}
           </div>`).join('')}
       </div>
       ${primary('Lösung aufdecken')}
@@ -751,14 +810,16 @@ function renderShowdown() {
 function potsHtml(res) {
   return `<div class="payouts">${res.pots.map((pt, i) => `
     <div><small>${res.pots.length > 1 ? (pt.refund ? 'Rückgabe (nicht gecallt)' : i === 0 ? 'Hauptpot' : `Side-Pot ${i}`) : 'Pot'}</small>
-    <b>${fmt(pt.amount)}</b> → ${pt.winners.map((id) => esc(byId(id).name)).join(' &amp; ')}${pt.winners.length > 1 ? ' <em>(geteilt)</em>' : ''}</div>`).join('')}</div>`;
+    <b>${fmt(pt.amount)}</b> an ${pt.winners.map((id) => esc(byId(id).name)).join(' &amp; ')}${pt.winners.length > 1 ? ' <em>(geteilt)</em>' : ''}</div>`).join('')}</div>`;
 }
 
 function renderResult() {
   const r = S.r; const q = r.q; const res = r.result || { ranking: [], pots: [] };
   const rank = res.ranking;
   const bestDist = rank.length ? rank[0].dist : null;
-  const lastRound = (S.settings.rounds && S.round >= S.settings.rounds);
+  // Letzte Runde: Fragenlimit erreicht – oder im Chip-Modus hat nur noch einer Chips
+  const lastRound = (S.settings.rounds && S.round >= S.settings.rounds) ||
+    (isChips() && S.players.filter((p) => !p.out && p.stack > 0).length < 2);
   const bestNames = rank.filter((x) => Math.abs(x.dist - bestDist) < 1e-9).map((x) => esc(byId(x.id).name));
   const dealer = esc(P(S.dealer).name);
   let modLine = '';
@@ -768,8 +829,12 @@ function renderResult() {
   }
   return `
     <div class="result">
-      <div class="qtext sm">${esc(q.q)}</div>
-      <div class="answer"><small>Die richtige Antwort</small><b>${fmtYear(q, Number(q.a))}</b><span>${esc(q.unit || '')}</span></div>
+      <div class="answer slip">
+        <p class="qtext sm">${esc(q.q)}</p>
+        <small>Die richtige Antwort</small>
+        <b data-count="${Number(q.a)}" data-year="${fmtYear(q, Number(q.a)) !== fmt(Number(q.a)) ? 1 : ''}">${fmtYear(q, Number(q.a))}</b>
+        <span>${esc(q.unit || '')}</span>
+      </div>
       ${q.info ? `<p class="info">${esc(q.info)}</p>` : ''}
       ${r.foldWin ? `<div class="foldwin"><b>${esc(byId(r.foldWin.id).name)}</b> gewinnt <b>${fmt(r.foldWin.amount)}</b> – alle anderen haben gepasst.</div>` : ''}
       ${rank.length ? `<ol class="ranking">${rank.map((x) => `
@@ -812,15 +877,14 @@ function renderEnd() {
   const list = S.players.slice().sort((a, b) => b.stack - a.stack);
   return `
     <div class="end">
-      <div class="logo-chip">★</div>
       <h1>Spielende</h1>
       ${isChips() ? `
         <div class="winner">${esc(list[0].name)}</div>
         <p class="sub">gewinnt mit <b>${fmt(list[0].stack)}</b> Chips</p>
         <ol class="ranking final">${list.map((p) => `<li><span class="n">${esc(p.name)}</span><span class="e">${fmt(p.stack)}</span></li>`).join('')}</ol>`
-        : `<p class="sub">${S.round} Runden gespielt. Zählt eure Chips – wer hat am meisten?</p>`}
+        : `<p class="sub">${S.round} ${S.round === 1 ? 'Runde' : 'Runden'} gespielt. Zählt eure Chips – wer hat am meisten?</p>`}
       <div class="row-btns center">
-        <button class="btn ghost" data-act="undo" ${history.length ? '' : 'disabled'}>↶ Zurück</button>
+        <button class="btn ghost" data-act="undo" ${history.length ? '' : 'disabled'}>Letzten Schritt zurück</button>
         <button class="btn gold big" data-act="new-game">Neues Spiel</button>
       </div>
     </div>`;
@@ -843,8 +907,8 @@ function renderModal() {
     <p class="sub small">Hinweis: „Runde abbrechen“ gibt im Chip-Modus alle Einsätze dieser Runde zurück.</p>`;
   else if (modal === 'players') body = renderPlayersModal();
   else if (modal === 'questions') body = renderQuestionsModal();
-  return `<div class="modal-bg" data-act="close-bg"><div class="modal" role="dialog">
-    <button class="icon-btn close" data-act="close">✕</button>${body}</div></div>`;
+  return `<div class="modal-bg" data-act="close-bg"><div class="modal modal-${esc(modal)}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+    <button class="icon-btn close" data-act="close" aria-label="Schließen">${ICON.close}</button>${body.replace('<h2>', '<h2 id="modal-title">')}</div></div>`;
 }
 
 const RULE_TABS = [
@@ -926,7 +990,7 @@ function renderRules() {
   };
   return `
     <h2>Spielregeln</h2>
-    <div class="tabs">${RULE_TABS.map(([k, l]) => `<button class="tab ${k === rulesTab ? 'on' : ''}" data-act="rules-tab" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div class="tabs">${RULE_TABS.map(([k, l]) => `<button class="tab ${k === rulesTab ? 'on' : ''}" aria-pressed="${k === rulesTab}" data-act="rules-tab" data-tab="${k}">${l}</button>`).join('')}</div>
     <div class="rules-body">${R[rulesTab] || R.ablauf}</div>`;
 }
 const CHIP_COLORS = {
@@ -987,7 +1051,7 @@ function renderVoiceModal() {
       <select data-voice>${voices.length ? voices.map((v) => `<option value="${esc(v.voiceURI)}" ${cur && v.voiceURI === cur.voiceURI ? 'selected' : ''}>${esc(voiceLabel(v))}</option>`).join('') : '<option>Keine deutsche Stimme gefunden</option>'}</select></label>
     <label>Tempo: ${fmt(Number(pr.rate) || 1)}×
       <input type="range" min="0.7" max="1.4" step="0.05" value="${Number(pr.rate) || 1}" data-rate></label>
-    <button class="btn gold" data-act="voice-test">▶ Probe hören</button>
+    <button class="btn gold" data-act="voice-test">Probe hören</button>
     <div class="voice-help">
       <h3>So wird die Stimme viel besser</h3>
       <p>Die Seite nutzt die Stimmen, die auf dem Gerät installiert sind. Standardmäßig sind die oft blechern – die guten muss man einmal laden:</p>
@@ -1004,7 +1068,7 @@ function renderVoiceModal() {
 function renderPlayersModal() {
   const rows = S.players.map((p) => `
     <div class="pm-row ${p.out ? 'out' : ''}">
-      <input type="text" value="${esc(p.name)}" data-pname="${p.id}" maxlength="18">
+      <input type="text" value="${esc(p.name)}" data-pname="${p.id}" aria-label="Name" maxlength="18">
       ${isChips() ? `<input type="number" value="${p.stack}" min="0" step="1" data-pstack="${p.id}" title="Stack (Chips vor dieser Runde nicht eingerechnet)">` : ''}
       <button class="btn sm ${p.out ? 'green' : 'ghost'}" data-act="toggle-out" data-id="${p.id}">${p.out ? 'Wieder rein' : 'Ausscheiden'}</button>
     </div>`).join('');
@@ -1013,7 +1077,7 @@ function renderPlayersModal() {
     <p class="sub small">Änderungen an Stacks gelten sofort. Ausgeschiedene / neue Spieler werden ab der nächsten Runde berücksichtigt.</p>
     <div class="pm">${rows}</div>
     <div class="row-btns">
-      <input type="text" id="new-player" placeholder="Neuer Spieler" maxlength="18">
+      <input type="text" id="new-player" placeholder="Neuer Spieler" aria-label="Name neuer Spieler" maxlength="18">
       <button class="btn gold" data-act="add-live-player">Hinzufügen</button>
     </div>`;
 }
@@ -1034,7 +1098,7 @@ function renderQuestionsModal() {
     </form>
     <div class="qlist">${custom.length ? custom.map((q) => `
       <div class="qitem"><div><b>${esc(q.q)}</b><span>${fmt(q.a)} ${esc(q.unit || '')}</span></div>
-      <button class="icon-btn" data-act="del-q" data-id="${esc(q.id)}">✕</button></div>`).join('') : '<p class="sub small">Noch keine eigenen Fragen.</p>'}</div>
+      <button class="icon-btn" data-act="del-q" data-id="${esc(q.id)}" aria-label="Frage löschen">${ICON.close}</button></div>`).join('') : '<p class="sub small">Noch keine eigenen Fragen.</p>'}</div>
     <div class="row-btns">
       <button class="btn ghost" data-act="export-q">Exportieren (JSON)</button>
       <label class="btn ghost file">Importieren<input type="file" accept=".json,application/json" data-import></label>
@@ -1093,7 +1157,7 @@ document.addEventListener('click', (e) => {
     case 'timer-stop': stopTimer(); render(); break;
     case 'tts':
       S.settings.tts = !S.settings.tts; save(); render();
-      if (!S.settings.tts) speechSynthesis?.cancel(); else speak('Sprachausgabe an.');
+      if (!S.settings.tts) window.speechSynthesis?.cancel(); else speak('Sprachausgabe an.');
       break;
     case 'fullscreen':
       if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.();
@@ -1179,6 +1243,14 @@ document.addEventListener('submit', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && modal) { modal = null; render(); return; }
+  if (e.key === 'Tab' && modal) {
+    const f = [...document.querySelectorAll('.modal button:not(:disabled), .modal input, .modal select, .modal [href]')].filter((x) => x.offsetParent !== null);
+    if (f.length) {
+      const first = f[0]; const last = f[f.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement?.classList.contains('modal'))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  }
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
   if (modal || !S || S.screen !== 'game') return;
   if (e.key === 'Enter' && (document.activeElement?.dataset.est != null || document.activeElement?.dataset.contrib != null)) {
@@ -1189,6 +1261,8 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Enter' && document.activeElement?.id === 'raise-to') { e.preventDefault(); $('[data-act="raise"]')?.click(); return; }
   if (typing) return;
+  const onOtherButton = /^(BUTTON|A)$/.test(document.activeElement?.tagName || '') && !document.activeElement.classList.contains('primary');
+  if (e.key === ' ' && onOtherButton) return; // Leertaste löst den fokussierten Button aus, nicht „Weiter“
   if ((e.key === ' ' || e.key === 'ArrowRight') && $('.primary')) { e.preventDefault(); next(); }
   if ((e.key === 'z' && (e.ctrlKey || e.metaKey)) || e.key === 'Backspace') { e.preventDefault(); undo(); }
 });
