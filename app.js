@@ -18,7 +18,11 @@ const PHASE_LABEL = {
 const DEFAULT_PREFS = {
   mode: 'moderator',
   players: ['', '', '', ''],
-  startStack: 1000,
+  startStack: 2000,
+  chips: [
+    { c: 'Weiß', v: 25, n: 0 }, { c: 'Rot', v: 50, n: 0 }, { c: 'Grün', v: 100, n: 0 },
+    { c: 'Blau', v: 250, n: 0 }, { c: 'Schwarz', v: 500, n: 0 }
+  ],
   schedule: '25/50, 50/100, 75/150, 100/200, 150/300, 200/400, 300/600, 400/800, 500/1000, 750/1500, 1000/2000',
   levelEvery: 3,
   rounds: 0,
@@ -66,7 +70,7 @@ function shuffle(a) {
 function load(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
 function store(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* egal */ } }
 
-function getPrefs() { return Object.assign({}, DEFAULT_PREFS, load(LS_PREFS, {})); }
+function getPrefs() { return JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PREFS, load(LS_PREFS, {})))); }
 function getCustom() { return load(LS_CUSTOM, []); }
 function questionPool(builtin) {
   const custom = getCustom();
@@ -509,7 +513,7 @@ function renderSetup() {
     </section>
     <section class="panel grid2">
       <h2 class="full">Einstellungen</h2>
-      <label class="${pr.mode === 'chips' ? '' : 'dim'}">Startchips pro Spieler
+      <label>Startchips pro Spieler
         <input type="number" min="1" step="1" value="${pr.startStack}" data-pref="startStack"></label>
       <label>Blinds steigen alle … Runden
         <input type="number" min="1" step="1" value="${pr.levelEvery}" data-pref="levelEvery"></label>
@@ -523,6 +527,17 @@ function renderSetup() {
         <button class="btn ghost sm" data-act="open" data-modal="voice">Stimme wählen</button></div>
       <label class="check"><input type="checkbox" ${pr.help !== false ? 'checked' : ''} data-pref="help"> Anfänger-Hilfe – kurze Erklärung bei jedem Schritt</label>
       <label class="check"><input type="checkbox" ${pr.builtin ? 'checked' : ''} data-pref="builtin"> Eingebaute Fragen verwenden (${(window.BUILTIN_QUESTIONS || []).length})</label>
+    </section>
+    <section class="panel">
+      <h2>Deine Chips <small>(Farbe, Wert, Anzahl im Set – optional)</small></h2>
+      <div class="chip-cfg">${pr.chips.map((x, i) => `
+        <div class="chip-row">
+          <span class="swatch" style="--c:${CHIP_COLORS[x.c] || '#888'}"></span>
+          <select data-chip="${i}" data-field="c" aria-label="Farbe">${Object.keys(CHIP_COLORS).map((c) => `<option ${c === x.c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+          <label class="mini">Wert<input type="number" min="1" step="1" value="${x.v}" data-chip="${i}" data-field="v"></label>
+          <label class="mini">im Set<input type="number" min="0" step="1" value="${x.n || ''}" placeholder="?" data-chip="${i}" data-field="n"></label>
+        </div>`).join('')}</div>
+      <div id="chip-plan">${chipTable(Number(pr.startStack) || 0, pr.players.length, pr.chips, parseSchedule(pr.schedule))}</div>
     </section>
     <section class="panel row">
       <div><b>${pool}</b> Fragen im Topf · <b>${getCustom().length}</b> eigene</div>
@@ -903,9 +918,9 @@ function renderRules() {
         <li><b>Bei Streit</b> entscheidet die Mehrheit am Tisch – oder ihr nutzt den Chip-Modus, dann zählt die Seite mit.</li>
       </ol>`,
     chips: `
-      <p>Startchips pro Spieler: <b>${fmt(stack)}</b>. Gute Aufteilung (mit Blinds 25/50 zum Start):</p>
-      ${chipTable(stack, n)}
-      <p class="sub small">Die Farben sind bei jedem Set anders – legt einfach fest, welche Farbe welchen Wert hat, und schreibt es auf einen Zettel in die Mitte.</p>
+      <p>Startchips pro Spieler: <b>${fmt(stack)}</b>. So wird aufgeteilt – viele kleine Chips zum Setzen, wenige große:</p>
+      ${chipTable(stack, n, getPrefs().chips, S ? S.settings.schedule : parseSchedule(getPrefs().schedule))}
+      <p class="sub small">Farben und Werte stellst du auf der Startseite unter „Deine Chips“ ein. Tipp: Schreibt die Werte auf einen Zettel in die Mitte.</p>
       <h3>Wenn die Blinds hoch werden</h3>
       <p>Die kleinsten Chips braucht ihr irgendwann nicht mehr. Dann <b>hochtauschen</b>: z. B. vier 25er gegen einen 100er.</p>`
   };
@@ -914,19 +929,52 @@ function renderRules() {
     <div class="tabs">${RULE_TABS.map(([k, l]) => `<button class="tab ${k === rulesTab ? 'on' : ''}" data-act="rules-tab" data-tab="${k}">${l}</button>`).join('')}</div>
     <div class="rules-body">${R[rulesTab] || R.ablauf}</div>`;
 }
-function chipTable(stack, n) {
-  // Aufteilung in 25er/50er/100er (+500er bei großen Stacks)
-  const plan = [];
-  let rest = stack;
-  const add = (v, c) => { c = Math.max(0, Math.min(c, Math.floor(rest / v))); if (c) { plan.push([v, c]); rest -= v * c; } };
-  if (stack >= 2000) add(500, Math.floor(stack / 2000));
-  add(25, 8); add(50, 6);
-  add(100, Math.floor(rest / 100));
-  if (rest > 0) add(25, Math.ceil(rest / 25));
-  plan.sort((a, b) => a[0] - b[0]);
-  return `<table class="ex"><thead><tr><th>Wert</th><th>pro Spieler</th><th>für ${n} Spieler</th></tr></thead><tbody>
-    ${plan.map(([v, c]) => `<tr><td>${fmt(v)}er</td><td>${c} Chips</td><td>${c * n} Chips</td></tr>`).join('')}
-    <tr class="sum"><td>Summe</td><td>${fmt(plan.reduce((s, [v, c]) => s + v * c, 0))}</td><td>${fmt(plan.reduce((s, [v, c]) => s + v * c, 0) * n)}</td></tr></tbody></table>`;
+const CHIP_COLORS = {
+  'Weiß': '#f2efe6', 'Rot': '#d1495b', 'Grün': '#2a9d8f', 'Blau': '#3d6fd8', 'Schwarz': '#1c1c1c',
+  'Gelb': '#e9c46a', 'Orange': '#f08a3c', 'Lila': '#8e5bd0', 'Pink': '#e86aa6', 'Grau': '#8a8f98', 'Braun': '#8b5a2b', 'Hellblau': '#7cc4f0'
+};
+// Verteilt den Startstack auf ALLE Chip-Werte: viele kleine, wenige große.
+function chipPlan(stack, chips, players) {
+  const list = chips.filter((x) => x.v > 0).map((x) => ({ ...x, per: 0 })).sort((a, b) => a.v - b.v);
+  const k = list.length;
+  if (!k || !stack) return { list, rest: stack, ok: false };
+  const wsum = list.reduce((s, _, i) => s + i + 2, 0);
+  list.forEach((x, i) => {
+    x.cap = x.n > 0 ? Math.floor(x.n / Math.max(1, players)) : Infinity;
+    x.per = Math.min(x.cap, Math.floor(((i + 2) / wsum) * stack / x.v));
+  });
+  let rest = stack - list.reduce((s, x) => s + x.per * x.v, 0);
+  // Rest auffüllen, große Werte zuerst
+  for (let i = k - 1; i >= 0; i--) {
+    const x = list[i]; const add = Math.max(0, Math.min(Math.floor(rest / x.v), x.cap - x.per));
+    x.per += add; rest -= add * x.v;
+  }
+  return { list, rest, ok: rest === 0 };
+}
+function chipTable(stack, n, chips, schedule) {
+  chips = chips || getPrefs().chips;
+  n = Math.max(1, n || 1);
+  const plan = chipPlan(stack, chips, n);
+  if (!plan.list.length) return '<p class="sub small">Trage oben die Werte deiner Chips ein.</p>';
+  const unused = plan.list.filter((x) => x.per === 0);
+  const short = plan.list.filter((x) => x.n > 0 && x.per * n > x.n);
+  let suggest = 0;
+  if (unused.length) {
+    for (let s = Math.ceil((stack + 1) / 500) * 500; s <= 50000; s += 500) {
+      const p = chipPlan(s, chips, n);
+      if (p.ok && p.list.every((x) => x.per > 0)) { suggest = s; break; }
+    }
+  }
+  const smallest = plan.list[0].v;
+  const sb = schedule && schedule[0] ? schedule[0][0] : null;
+  const total = plan.list.reduce((s, x) => s + x.per * x.v, 0);
+  return `<table class="ex chips-t"><thead><tr><th>Farbe</th><th>Wert</th><th>pro Spieler</th><th>für ${n} Spieler</th></tr></thead><tbody>
+    ${plan.list.map((x) => `<tr class="${x.per === 0 ? 'zero' : ''}"><td><span class="swatch sm" style="--c:${CHIP_COLORS[x.c] || '#888'}"></span>${esc(x.c)}</td><td>${fmt(x.v)}</td><td>${x.per} Stück</td><td>${x.per * n}${x.n > 0 ? ` <small>von ${x.n}</small>` : ''}</td></tr>`).join('')}
+    <tr class="sum"><td>Summe</td><td></td><td>${fmt(total)}</td><td>${fmt(total * n)}</td></tr></tbody></table>
+    ${!plan.ok ? `<p class="warn">${fmt(stack)} lässt sich mit diesen Chips nicht genau legen${plan.rest ? ` (es fehlen ${fmt(plan.rest)})` : ''}. Startchips auf ein Vielfaches von ${fmt(smallest)} setzen${plan.list.some((x) => x.n > 0) ? ' oder es sind zu wenig Chips im Set' : ''}.</p>` : ''}
+    ${unused.length ? `<p class="warn">${unused.map((x) => `${esc(x.c)} (${fmt(x.v)})`).join(', ')} ${unused.length > 1 ? 'werden' : 'wird'} bei ${fmt(stack)} Startchips nicht gebraucht${suggest ? ` – mit <b>${fmt(suggest)}</b> Startchips sind alle ${plan.list.length} Farben dabei` : ''}. Große Chips kommen sonst erst beim Hochtauschen ins Spiel.</p>` : ''}
+    ${short.length ? `<p class="warn">Nicht genug Chips im Set: ${short.map((x) => esc(x.c)).join(', ')}.</p>` : ''}
+    ${sb && sb % smallest !== 0 ? `<p class="warn">Der erste Small Blind (${fmt(sb)}) lässt sich mit dem kleinsten Chip (${fmt(smallest)}) nicht legen – Blind-Stufen anpassen.</p>` : ''}`;
 }
 function renderVoiceModal() {
   const pr = getPrefs();
@@ -1080,11 +1128,20 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('input', (e) => {
   const t = e.target;
+  if (t.dataset.chip != null) {
+    const pr = getPrefs(); const x = pr.chips[Number(t.dataset.chip)]; const f = t.dataset.field;
+    x[f] = f === 'c' ? t.value : Math.max(0, Math.floor(Number(t.value) || 0));
+    store(LS_PREFS, pr);
+    const el = document.getElementById('chip-plan'); if (el) el.innerHTML = chipTable(Number(pr.startStack) || 0, pr.players.length, pr.chips, parseSchedule(pr.schedule));
+    if (f === 'c') t.previousElementSibling.style.setProperty('--c', CHIP_COLORS[t.value] || '#888');
+    return;
+  }
   if (t.dataset.prefPlayer != null) { const pr = getPrefs(); pr.players[Number(t.dataset.prefPlayer)] = t.value; store(LS_PREFS, pr); }
   else if (t.dataset.pref) {
     const pr = getPrefs(); const k = t.dataset.pref;
     pr[k] = t.type === 'checkbox' ? t.checked : (t.type === 'number' ? Number(t.value) : t.value);
     store(LS_PREFS, pr);
+    const cp = document.getElementById('chip-plan'); if (cp && (k === 'startStack' || k === 'schedule')) cp.innerHTML = chipTable(Number(pr.startStack) || 0, pr.players.length, pr.chips, parseSchedule(pr.schedule));
   } else if (t.dataset.est) { S.r.estimates[t.dataset.est] = parseNum(t.value); save(); }
   else if (t.dataset.contrib) { S.r.contrib = S.r.contrib || {}; S.r.contrib[t.dataset.contrib] = parseNum(t.value); save(); }
   else if (t.dataset.pname) { byId(t.dataset.pname).name = t.value; save(); }
@@ -1092,7 +1149,7 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', (e) => {
   const t = e.target;
-  if (t.dataset.pref === 'tts' || t.dataset.pref === 'builtin' || t.dataset.pref === 'startStack') render();
+  if (t.dataset.pref === 'tts' || t.dataset.pref === 'builtin') render();
   if (t.dataset.voice != null) { const pr = getPrefs(); pr.voice = t.value; store(LS_PREFS, pr); speak('So klinge ich.', true); }
   if (t.dataset.rate != null) { const pr = getPrefs(); pr.rate = Number(t.value); store(LS_PREFS, pr); render(); speak('So schnell spreche ich jetzt.', true); }
   if (t.dataset.pname || t.dataset.pstack) render();

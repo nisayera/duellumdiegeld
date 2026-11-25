@@ -19,6 +19,7 @@ Moderator-Webseite für einen Schätzpoker-Abend – Quiz trifft Poker, inspirie
 - Ausführliche Regeln: Poker-Basics, Spielzüge, Side-Pots, Spielen ohne Croupier, Chips aufteilen
 - Anfänger-Hilfe: kurze Erklärung bei jedem Schritt
 - Pot-Rechner im Moderator-Modus für All-ins und Side-Pots
+- Chip-Aufteilung für dein eigenes Set (bis zu 5 Farben mit Wert und Anzahl)
 - Eigene Fragen hinzufügen, exportieren & importieren (werden im Browser gespeichert)
 - Sprachausgabe als Moderator – Stimme & Tempo wählbar, beste Stimme wird automatisch gewählt (Tipp: Microsoft Edge oder Premium-Stimmen am Mac)
 - Rückgängig-Funktion, Spielstand bleibt beim Neuladen erhalten

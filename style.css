@@ -326,3 +326,16 @@ input[type=range] { width: 100%; accent-color: var(--gold); }
   .with-bet .est .en { grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+
+/* Chip-Set */
+.chip-cfg { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 10px; margin-bottom: 14px; }
+.chip-row { display: grid; grid-template-columns: 34px minmax(108px, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: end; background: rgba(0,0,0,.18); padding: 10px; border-radius: 14px; }
+.chip-row select { padding: 10px; }
+.swatch { --c: #888; width: 34px; height: 34px; border-radius: 50%; align-self: center; flex: none; display: inline-block;
+  background: radial-gradient(circle, var(--c) 52%, transparent 53%), repeating-conic-gradient(var(--c) 0 30deg, #f4ecd8 30deg 45deg);
+  box-shadow: 0 0 0 2px rgba(0,0,0,.35), 0 3px 8px rgba(0,0,0,.35); }
+.swatch.sm { width: 18px; height: 18px; vertical-align: -4px; margin-right: 8px; }
+label.mini { font-size: .75rem; gap: 4px; color: var(--muted); }
+label.mini input { padding: 9px 10px; }
+.chips-t tr.zero td { opacity: .45; }
+.warn { color: #ffd38a; background: rgba(240,138,60,.12); border: 1px solid rgba(240,138,60,.4); border-radius: 12px; padding: 10px 12px; font-size: .92rem; margin: 8px 0 0; }
