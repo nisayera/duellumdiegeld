@@ -24,12 +24,16 @@ const DEFAULT_PREFS = {
   rounds: 0,
   timer: 60,
   tts: false,
+  voice: '',
+  rate: 1,
+  help: true,
   builtin: true
 };
 
 let S = null;          // aktueller Spielzustand
 let history = [];      // Undo-Stack
 let modal = null;      // offenes Modal
+let rulesTab = 'ablauf';
 let timer = { left: 0, int: null };
 
 /* ---------- Helfer ---------- */
@@ -70,16 +74,54 @@ function questionPool(builtin) {
 }
 
 /* ---------- Sprachausgabe & Ton ---------- */
-function speak(text) {
-  if (!S || !S.settings.tts || !('speechSynthesis' in window)) return;
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'de-DE';
-  const v = speechSynthesis.getVoices().find((x) => x.lang && x.lang.startsWith('de'));
-  if (v) u.voice = v;
-  u.rate = 1;
-  speechSynthesis.speak(u);
+let voices = [];
+function loadVoices() {
+  if (!('speechSynthesis' in window)) return;
+  voices = speechSynthesis.getVoices().filter((v) => v.lang && v.lang.toLowerCase().replace('_', '-').startsWith('de'));
+  voices.sort((a, b) => voiceScore(b) - voiceScore(a));
+  if (modal === 'voice') render();
 }
+// Bewertet Stimmen: hochwertige (Premium/Enhanced/Natural/Google) nach oben, Spaßstimmen von macOS nach unten
+function voiceScore(v) {
+  const n = v.name.toLowerCase();
+  let s = 0;
+  if (/premium/.test(n)) s += 60;
+  if (/natural|neural/.test(n)) s += 55;
+  if (/enhanced|erweitert|verbessert/.test(n)) s += 45;
+  if (/online/.test(n)) s += 20;
+  if (/google/.test(n)) s += 35;
+  if (/anna|petra|markus|yannick|helena|katja|conrad|amala|seraphina|florian|killian|louisa|vicki|hedda|stefan/.test(n)) s += 6;
+  if (v.lang === 'de-DE') s += 3;
+  if (/grandma|grandpa|oma|opa|eddy|flo|reed|rocko|sandy|shelley|albert|bad news|bahh|bells|boing|bubbles|cellos|wobble|good news|jester|organ|superstar|trinoids|whisper|zarvox|junior|ralph|kathy|fred/.test(n)) s -= 80;
+  return s;
+}
+function bestVoice() {
+  const pref = getPrefs().voice;
+  return voices.find((v) => v.voiceURI === pref) || voices[0] || null;
+}
+function voiceLabel(v) {
+  const n = v.name.toLowerCase();
+  const q = voiceScore(v) >= 40 ? ' ★ hohe Qualität' : voiceScore(v) < 0 ? ' (Spaßstimme)' : '';
+  return `${v.name} – ${v.lang}${q}`;
+}
+function speak(text, force) {
+  if (!force && (!S || !S.settings.tts)) return;
+  if (!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const pr = getPrefs();
+  const v = bestVoice();
+  // Satzweise sprechen: natürlichere Pausen und kein Abbrechen bei langen Texten (Chrome-Bug)
+  const parts = String(text).split(/(?<=[.!?…:])\s+/).map((x) => x.trim()).filter(Boolean);
+  parts.forEach((part) => {
+    const u = new SpeechSynthesisUtterance(part);
+    u.lang = v ? v.lang : 'de-DE';
+    if (v) u.voice = v;
+    u.rate = Number(pr.rate) || 1;
+    u.pitch = 1;
+    speechSynthesis.speak(u);
+  });
+}
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 function beep(freq = 880, dur = 0.18, times = 1) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -127,7 +169,7 @@ function startGame(cfg) {
     screen: 'game',
     settings: {
       mode: cfg.mode, startStack: cfg.startStack, schedule: cfg.schedule, levelEvery: cfg.levelEvery,
-      rounds: cfg.rounds, timer: cfg.timer, tts: cfg.tts
+      rounds: cfg.rounds, timer: cfg.timer, tts: cfg.tts, help: cfg.help
     },
     players: cfg.names.map((n, i) => ({ id: 'p' + i, name: n, stack: cfg.mode === 'chips' ? cfg.startStack : 0, out: false })),
     nextId: cfg.names.length,
@@ -165,7 +207,7 @@ function newRound() {
   S.r = {
     q, phase: 'intro', level: lvl, sb, bb, levelUp: S.round > 1 && lvl > prevLvl,
     sbIdx, bbIdx, hand: {}, currentBet: 0, minRaise: bb, toAct: -1, acted: [], betDone: false,
-    estimates: {}, result: null, foldWin: null, nextLevelIn: S.settings.levelEvery - ((S.round - 1) % S.settings.levelEvery)
+    estimates: {}, contrib: {}, potCalc: false, result: null, foldWin: null, nextLevelIn: S.settings.levelEvery - ((S.round - 1) % S.settings.levelEvery)
   };
   if (isChips()) {
     act.forEach((p) => { S.r.hand[p.id] = { inRound: 0, total: 0, folded: false, allIn: false }; });
@@ -263,49 +305,69 @@ function finishByFold(winner) {
 }
 
 /* ---------- Auflösung / Side-Pots ---------- */
+// Reine Pot-Berechnung (Haupt- und Side-Pots).
+// rows: [{ id, total, live, dist, order }] – total = gesamt eingesetzt, live = noch im Spiel, order = Sitzfolge ab Dealer
+function computePots(rows) {
+  const live = rows.filter((x) => x.live);
+  const sum = rows.reduce((s, x) => s + x.total, 0);
+  const levels = [...new Set(live.map((x) => x.total))].filter((L) => L > 0).sort((x, y) => x - y);
+  const pots = []; const payout = {};
+  let prev = 0; let distributed = 0;
+  levels.forEach((L, li) => {
+    let slice = rows.reduce((s, x) => s + Math.min(x.total, L) - Math.min(x.total, prev), 0);
+    if (li === levels.length - 1) slice = sum - distributed; // Rest inkl. Einsätze von Gepassten
+    const elig = live.filter((x) => x.total >= L);
+    const best = Math.min(...elig.map((x) => x.dist));
+    const winners = elig.filter((x) => Math.abs(x.dist - best) < 1e-9).sort((x, y) => x.order - y.order);
+    const share = Math.floor(slice / winners.length);
+    let rest = slice - share * winners.length;
+    winners.forEach((w) => { payout[w.id] = (payout[w.id] || 0) + share + (rest > 0 ? 1 : 0); if (rest > 0) rest--; });
+    if (slice > 0) pots.push({ amount: slice, winners: winners.map((w) => w.id), refund: elig.length === 1 && levels.length > 1 && li === levels.length - 1 });
+    distributed += slice; prev = L;
+  });
+  return { pots, payout };
+}
+
 function resolveShowdown() {
   const r = S.r; const a = Number(r.q.a);
+  const has = (p) => r.estimates[p.id] != null && !isNaN(r.estimates[p.id]);
   const contenders = isChips() ? S.players.filter((p) => inHand(p)) : S.players.filter(inPlay);
-  const ranking = contenders
-    .filter((p) => !isNaN(r.estimates[p.id]))
+  const ranking = contenders.filter(has)
     .map((p) => ({ id: p.id, est: r.estimates[p.id], dist: Math.abs(r.estimates[p.id] - a) }))
     .sort((x, y) => x.dist - y.dist);
+  const dist = Object.fromEntries(ranking.map((x) => [x.id, x.dist]));
 
   if (isChips()) {
-    const missing = contenders.filter((p) => isNaN(r.estimates[p.id]));
+    const missing = contenders.filter((p) => !has(p));
     if (missing.length) { toast('Bitte Schätzungen eintragen für: ' + missing.map((p) => p.name).join(', ')); return; }
   }
-  snap();
-  const dist = Object.fromEntries(ranking.map((x) => [x.id, x.dist]));
-  const pots = [];
-  if (isChips()) {
-    const all = S.players.filter((p) => r.hand[p.id]);
-    const live = all.filter((p) => inHand(p));
-    const levels = [...new Set(live.map((p) => H(p).total))].sort((x, y) => x - y);
-    let prev = 0; let distributed = 0;
-    levels.forEach((L, li) => {
-      let slice = all.reduce((s, p) => s + Math.min(H(p).total, L) - Math.min(H(p).total, prev), 0);
-      if (li === levels.length - 1) slice = potTotal() - distributed; // Rest (Sicherheitsnetz)
-      const elig = live.filter((p) => H(p).total >= L);
-      const best = Math.min(...elig.map((p) => dist[p.id]));
-      const winners = elig.filter((p) => Math.abs(dist[p.id] - best) < 1e-9);
-      // Reihenfolge ab Dealer für Restchips
-      winners.sort((x, y) => seatOrder(x) - seatOrder(y));
-      const share = Math.floor(slice / winners.length);
-      let rest = slice - share * winners.length;
-      winners.forEach((w) => { w.stack += share + (rest > 0 ? 1 : 0); if (rest > 0) rest--; });
-      if (slice > 0) pots.push({ amount: slice, winners: winners.map((w) => w.id), refund: elig.length === 1 && levels.length > 1 && li === levels.length - 1 });
-      distributed += slice; prev = L;
-    });
+  let pots = [];
+  let modPot = false;
+  if (!isChips() && r.potCalc) {
+    const c = (p) => Math.max(0, Number(r.contrib[p.id]) || 0);
+    const rows = S.players.filter(inPlay).filter((p) => c(p) > 0 || has(p));
+    const noBet = rows.filter((p) => has(p) && c(p) <= 0);
+    if (noBet.length) { toast('Bitte Einsatz eintragen für: ' + noBet.map((p) => p.name).join(', ')); return; }
+    if (!rows.some(has)) { toast('Mindestens eine Schätzung eintragen.'); return; }
+    modPot = true;
+    pots = computePots(rows.map((p) => ({ id: p.id, total: c(p), live: has(p), dist: dist[p.id], order: seatOrder(p) }))).pots;
   }
-  r.result = { ranking, pots };
+  snap();
+  if (isChips()) {
+    const res = computePots(S.players.filter((p) => r.hand[p.id]).map((p) => ({
+      id: p.id, total: H(p).total, live: inHand(p), dist: dist[p.id], order: seatOrder(p)
+    })));
+    pots = res.pots;
+    Object.entries(res.payout).forEach(([id, v]) => { byId(id).stack += v; });
+  }
+  r.result = { ranking, pots, modPot };
   r.phase = 'result';
   stopTimer();
   save(); render();
-  let txt = `Die richtige Antwort lautet: ${spokenAnswer()}.`;
+  let txt = `${pick(['Die richtige Antwort lautet …', 'Und die Lösung ist …', 'Richtig ist …'])} ${spokenAnswer()}!`;
   if (ranking.length) {
     const best = ranking.filter((x) => Math.abs(x.dist - ranking[0].dist) < 1e-9).map((x) => byId(x.id).name);
-    txt += ` Am nächsten dran: ${best.join(' und ')}.`;
+    txt += ` ${pick(['Am nächsten dran:', 'Die beste Schätzung hatte:', 'Am besten geschätzt hat:'])} ${best.join(' und ')}.`;
   }
   speak(txt);
 }
@@ -335,19 +397,27 @@ function announce() {
   const r = S.r; if (!r) return;
   const names = (i) => (i >= 0 ? P(i).name : '');
   switch (r.phase) {
-    case 'intro':
-      speak(`Runde ${S.round}. ${r.levelUp ? 'Achtung, die Blinds steigen! ' : ''}Small Blind ${fmt(r.sb)}, Big Blind ${fmt(r.bb)}. ${names(r.sbIdx)} setzt den Small Blind, ${names(r.bbIdx)} den Big Blind.`);
-      break;
-    case 'question': speak(`Die Frage lautet: ${r.q.q} Schreibt eure Schätzung verdeckt auf.`); break;
-    case 'hint1': speak(`Erster Hinweis: ${r.q.h1}`); break;
-    case 'hint2': speak(`Zweiter Hinweis: ${r.q.h2}`); break;
-    case 'bet0': case 'bet1': case 'bet2': {
-      const k = Number(r.phase.slice(3)) + 1;
-      if (isChips()) speak(r.betDone ? `Setzrunde ${k} entfällt, es kann niemand mehr setzen.` : `Setzrunde ${k}. ${names(r.toAct)} ist am Zug.`);
-      else speak(`Setzrunde ${k}. Es beginnt ${names(firstToActModerator())}.`);
+    case 'intro': {
+      const open = S.round === 1
+        ? pick(['Herzlich willkommen zum Schätzpoker! Wir starten mit Runde 1.', 'Willkommen am Tisch! Runde 1, es geht los.'])
+        : pick([`Weiter geht's mit Runde ${S.round}.`, `Runde ${S.round}!`, `Auf in Runde ${S.round}.`]);
+      const lvl = r.levelUp ? pick(['Achtung: Die Blinds steigen!', 'Es wird teurer, die Blinds steigen!']) : '';
+      speak(`${open} ${lvl} ${names(S.dealer)} hat den Dealer-Button. ${names(r.sbIdx)} setzt ${fmt(r.sb)} als Small Blind, ${names(r.bbIdx)} setzt ${fmt(r.bb)} als Big Blind.`);
       break;
     }
-    case 'showdown': speak('Showdown! Deckt eure Schätzungen auf.'); break;
+    case 'question':
+      speak(`${pick(['Aufgepasst, hier kommt die Frage:', 'Und jetzt die Frage:', 'Hört gut zu:', 'Die nächste Frage lautet:'])} ${r.q.q} ${pick(['Schreibt eure Schätzung verdeckt auf.', 'Zettel und Stift raus, und schön verdeckt aufschreiben.', 'Jeder schreibt seine Schätzung auf, ohne dass die anderen sie sehen.'])}`);
+      break;
+    case 'hint1': speak(`${pick(['Hier kommt der erste Hinweis:', 'Erster Hinweis:', 'Ein kleiner Tipp für euch:'])} ${r.q.h1}`); break;
+    case 'hint2': speak(`${pick(['Und hier der zweite Hinweis:', 'Zweiter und letzter Hinweis:', 'Noch ein Hinweis, der letzte:'])} ${r.q.h2}`); break;
+    case 'bet0': case 'bet1': case 'bet2': {
+      const k = Number(r.phase.slice(3)) + 1;
+      const who = isChips() ? r.toAct : firstToActModerator();
+      if (isChips() && r.betDone) speak(`Setzrunde ${k} entfällt. Es kann niemand mehr setzen.`);
+      else speak(`${k === 3 ? 'Letzte Setzrunde.' : `Setzrunde ${k}.`} ${names(who)}, ${pick(['du bist dran.', 'du beginnst.', 'deine Entscheidung.'])}`);
+      break;
+    }
+    case 'showdown': speak(pick(['Showdown! Deckt eure Schätzungen auf.', 'Zettel auf den Tisch, zeigt her!', 'Und jetzt: aufdecken!'])); break;
   }
 }
 function firstToActModerator() {
@@ -449,7 +519,9 @@ function renderSetup() {
         <input type="number" min="0" step="1" value="${pr.rounds}" data-pref="rounds"></label>
       <label>Schreib-Timer in Sekunden <small>(0 = aus)</small>
         <input type="number" min="0" step="5" value="${pr.timer}" data-pref="timer"></label>
-      <label class="check"><input type="checkbox" ${pr.tts ? 'checked' : ''} data-pref="tts"> Sprachausgabe – die Seite liest Fragen &amp; Hinweise vor</label>
+      <div class="check-row full"><label class="check"><input type="checkbox" ${pr.tts ? 'checked' : ''} data-pref="tts"> Sprachausgabe – die Seite moderiert laut</label>
+        <button class="btn ghost sm" data-act="open" data-modal="voice">Stimme wählen</button></div>
+      <label class="check"><input type="checkbox" ${pr.help !== false ? 'checked' : ''} data-pref="help"> Anfänger-Hilfe – kurze Erklärung bei jedem Schritt</label>
       <label class="check"><input type="checkbox" ${pr.builtin ? 'checked' : ''} data-pref="builtin"> Eingebaute Fragen verwenden (${(window.BUILTIN_QUESTIONS || []).length})</label>
     </section>
     <section class="panel row">
@@ -516,6 +588,9 @@ function primary(label, extra = '') {
 }
 
 function renderStage() {
+  return stageContent() + helpBox();
+}
+function stageContent() {
   const r = S.r;
   const name = (i) => (i >= 0 ? esc(P(i).name) : '–');
   switch (r.phase) {
@@ -549,6 +624,24 @@ function renderStage() {
   return '';
 }
 
+
+function helpBox() {
+  if (!S.settings.help) return '';
+  const r = S.r; const ph = r.phase;
+  const T = {
+    intro: 'Die zwei Spieler links vom Dealer zahlen Pflichteinsätze, die <b>Blinds</b>. So liegt in jeder Runde schon etwas im Pot und es lohnt sich zu spielen. Der Dealer-Button wandert jede Runde eins weiter.',
+    question: 'Jeder schreibt <b>eine Zahl</b> auf einen Zettel und legt ihn verdeckt vor sich. Danach wird nichts mehr geändert! Gesetzt wird erst gleich.',
+    bet0: 'Reihum entscheidet jeder: <b>Passen</b> (raus, Einsatz ist weg), <b>Mitgehen</b> (auf den höchsten Einsatz auffüllen), <b>Erhöhen</b> (mehr setzen) oder <b>All-in</b>. Wer den Big Blind schon bezahlt hat, darf am Ende <b>checken</b>. Die Runde endet, wenn alle gleich viel drin haben.',
+    bet: '<b>Checken</b> = nichts setzen (nur, wenn noch keiner gesetzt hat). <b>Setzen</b> = erster Einsatz der Runde, mindestens 1 Big Blind. Danach: passen, mitgehen oder erhöhen. Die Runde endet, wenn alle gleich viel gesetzt oder gepasst haben.',
+    hint: 'Der Hinweis zeigt dir, ob deine Zahl gut oder daneben ist. Deine Schätzung bleibt trotzdem stehen – jetzt geht es ums Pokern: weitermachen, aussteigen oder bluffen?',
+    showdown: 'Alle, die nicht gepasst haben, zeigen ihren Zettel. Wer gepasst hat, muss seinen Zettel nicht zeigen.',
+    result: 'Wer am nächsten an der richtigen Antwort liegt, gewinnt den Pot – egal ob drüber oder drunter. Gleich nah = Pot wird geteilt. Wer All-in war, kann nur so viel gewinnen, wie er selbst eingesetzt hat (Side-Pot).'
+  };
+  const key = ph === 'bet0' ? 'bet0' : ph.startsWith('bet') ? 'bet' : ph.startsWith('hint') ? 'hint' : ph;
+  if (!T[key]) return '';
+  return `<div class="help"><span>Kurz erklärt</span><p>${T[key]}</p><button class="link" data-act="rules-at" data-tab="${key === 'result' || key === 'showdown' ? 'sidepot' : key.startsWith('bet') ? 'zuege' : 'poker'}">Mehr in den Regeln →</button></div>`;
+}
+
 function renderBetting() {
   const r = S.r; const k = Number(r.phase.slice(3)) + 1;
   const nextLabel = k === 3 ? 'Zum Showdown' : `Hinweis ${k} aufdecken`;
@@ -557,7 +650,8 @@ function renderBetting() {
     return `
       <div class="betbox">
         <div class="bet-title">Setzrunde ${k} <small>von 3</small></div>
-        <p class="sub">Es beginnt <b>${esc(P(first).name)}</b>${k === 1 ? ' (links vom Big Blind)' : ' (links vom Dealer)'}.<br>Passen · Checken · Mitgehen · Erhöhen · All-in</p>
+        <p class="sub">Es beginnt <b>${esc(P(first).name)}</b>${k === 1 ? ' (links vom Big Blind)' : ' (links vom Dealer)'}, dann reihum im Uhrzeigersinn.</p>
+        <p class="sub small">Einsätze bleiben <b>vor euch</b> liegen. Wenn alle gleich viel gesetzt oder gepasst haben, schiebt <b>${esc(P(S.dealer).name)}</b> (Dealer) alles in die Mitte.</p>
         ${primary(`Setzrunde beendet → ${nextLabel}`, 'data-autofocus')}
       </div>`;
   }
@@ -612,20 +706,37 @@ function renderBetting() {
 
 function renderShowdown() {
   const r = S.r;
+  r.contrib = r.contrib || {};
   const list = isChips() ? S.players.filter((p) => inHand(p)) : S.players.filter(inPlay);
+  const val = (v) => (v == null || isNaN(v) ? '' : String(v).replace('.', ','));
+  const calc = !isChips() && r.potCalc;
   return `
     ${questionBlock(true)}
     <div class="showdown">
       <div class="bet-title">Showdown – Schätzungen aufdecken!</div>
-      <p class="sub">${isChips() ? 'Tragt die Schätzungen aller Spieler ein, die noch dabei sind.' : 'Optional: Schätzungen eintragen, dann zeigt die Seite, wer am nächsten dran war.'}</p>
-      <div class="est-list">
+      <p class="sub">${isChips()
+        ? 'Tragt die Schätzungen aller Spieler ein, die noch dabei sind.'
+        : 'Schätzungen eintragen, dann zeigt die Seite, wer am nächsten dran war. <b>Wer gepasst hat: Feld leer lassen.</b>'}</p>
+      ${!isChips() ? `
+        <button class="btn ${calc ? 'gold' : 'ghost'} sm potcalc-toggle" data-act="potcalc">${calc ? '✓ Pot-Rechner an' : 'Jemand ist All-in? Pot-Rechner einschalten'}</button>
+        ${calc ? '<p class="sub small">Tragt bei <b>jedem</b>, der in dieser Runde Chips in den Pot gelegt hat, ein, wie viel es <b>insgesamt</b> war (inkl. Blinds) – auch bei denen, die gepasst haben. Die Seite rechnet Haupt- und Side-Pots aus.</p>' : ''}` : ''}
+      <div class="est-list ${calc ? 'with-bet' : ''}">
         ${list.map((p, i) => `
-          <label class="est"><span>${esc(p.name)}</span>
-            <input type="text" inputmode="decimal" placeholder="Schätzung" value="${isNaN(r.estimates[p.id]) || r.estimates[p.id] == null ? '' : String(r.estimates[p.id]).replace('.', ',')}" data-est="${p.id}" ${i === 0 ? 'data-autofocus' : ''}>
-            ${r.q.unit ? `<em>${esc(r.q.unit)}</em>` : ''}</label>`).join('')}
+          <div class="est">
+            <span class="en">${esc(p.name)}</span>
+            <label class="ef"><input type="text" inputmode="decimal" placeholder="Schätzung" value="${val(r.estimates[p.id])}" data-est="${p.id}" ${i === 0 ? 'data-autofocus' : ''}>
+              ${r.q.unit ? `<em>${esc(r.q.unit)}</em>` : ''}</label>
+            ${calc ? `<label class="ef bet-in"><input type="text" inputmode="numeric" placeholder="Einsatz gesamt" value="${val(r.contrib[p.id])}" data-contrib="${p.id}"><em>Chips</em></label>` : ''}
+          </div>`).join('')}
       </div>
       ${primary('Lösung aufdecken')}
     </div>`;
+}
+
+function potsHtml(res) {
+  return `<div class="payouts">${res.pots.map((pt, i) => `
+    <div><small>${res.pots.length > 1 ? (pt.refund ? 'Rückgabe (nicht gecallt)' : i === 0 ? 'Hauptpot' : `Side-Pot ${i}`) : 'Pot'}</small>
+    <b>${fmt(pt.amount)}</b> → ${pt.winners.map((id) => esc(byId(id).name)).join(' &amp; ')}${pt.winners.length > 1 ? ' <em>(geteilt)</em>' : ''}</div>`).join('')}</div>`;
 }
 
 function renderResult() {
@@ -633,6 +744,13 @@ function renderResult() {
   const rank = res.ranking;
   const bestDist = rank.length ? rank[0].dist : null;
   const lastRound = (S.settings.rounds && S.round >= S.settings.rounds);
+  const bestNames = rank.filter((x) => Math.abs(x.dist - bestDist) < 1e-9).map((x) => esc(byId(x.id).name));
+  const dealer = esc(P(S.dealer).name);
+  let modLine = '';
+  if (!isChips()) {
+    if (res.modPot) modLine = `${potsHtml(res)}<p class="sub"><b>${dealer}</b> (Dealer) teilt den Pot so auf.</p>`;
+    else if (rank.length) modLine = `<p class="sub">Der Pot geht an <b>${bestNames.join(' &amp; ')}</b>${bestNames.length > 1 ? ' – wird geteilt' : ''}. <b>${dealer}</b> (Dealer) schiebt ihn rüber.<br><small>War jemand All-in? Dann mit ↶ zurück und den Pot-Rechner nutzen.</small></p>`;
+  }
   return `
     <div class="result">
       <div class="qtext sm">${esc(q.q)}</div>
@@ -645,10 +763,8 @@ function renderResult() {
             <span class="e">${fmtYear(q, x.est)}</span>
             <span class="d">${x.dist === 0 ? 'exakt!' : '± ' + fmt(x.dist)}</span>
           </li>`).join('')}</ol>` : ''}
-      ${isChips() && !r.foldWin && res.pots.length ? `<div class="payouts">${res.pots.map((pt, i) => `
-          <div><small>${res.pots.length > 1 ? (i === 0 ? 'Hauptpot' : pt.refund ? 'Rückgabe' : `Side-Pot ${i}`) : 'Pot'}</small>
-          <b>${fmt(pt.amount)}</b> → ${pt.winners.map((id) => esc(byId(id).name)).join(' &amp; ')}</div>`).join('')}</div>` : ''}
-      ${!isChips() && rank.length ? `<p class="sub">Der Pot geht an <b>${rank.filter((x) => Math.abs(x.dist - bestDist) < 1e-9).map((x) => esc(byId(x.id).name)).join(' &amp; ')}</b> (bei Side-Pots: nur wer mitgegangen ist).</p>` : ''}
+      ${isChips() && !r.foldWin && res.pots.length ? potsHtml(res) : ''}
+      ${modLine}
       ${primary(lastRound ? 'Zur Endwertung' : 'Nächste Runde', 'data-autofocus')}
     </div>`;
 }
@@ -698,22 +814,13 @@ function renderEnd() {
 /* ---------- Modals ---------- */
 function renderModal() {
   let body = '';
-  if (modal === 'rules') body = `
-    <h2>Spielregeln</h2>
-    <ol class="rules">
-      <li><b>Blinds:</b> Der Dealer-Button wandert jede Runde eins weiter. Links vom Dealer setzt der Small Blind, danach der Big Blind. Die Blinds steigen in festen Abständen.</li>
-      <li><b>Frage:</b> Es wird eine Schätzfrage gestellt. Jeder schreibt seine Antwort <b>verdeckt</b> auf. Danach wird nichts mehr geändert.</li>
-      <li><b>Setzrunde 1:</b> Beginnt links vom Big Blind. Passen, Mitgehen oder Erhöhen wie beim Poker (No-Limit).</li>
-      <li><b>Hinweis 1</b> wird aufgedeckt → <b>Setzrunde 2</b> (beginnt links vom Dealer).</li>
-      <li><b>Hinweis 2</b> wird aufgedeckt → <b>Setzrunde 3</b>.</li>
-      <li><b>Showdown:</b> Alle, die noch dabei sind, decken ihre Schätzung auf. Dann wird die richtige Antwort gezeigt.</li>
-      <li><b>Gewinner:</b> Wer am nächsten dran ist, gewinnt den Pot. Bei Gleichstand wird geteilt. Wer All-in ist, kann nur so viel gewinnen, wie er selbst eingesetzt hat (Side-Pot).</li>
-      <li>Passen alle anderen, gewinnt der letzte Spieler den Pot sofort – ohne aufzudecken.</li>
-      <li>Wer keine Chips mehr hat, scheidet aus. Gewonnen hat, wer am Ende alle Chips hat (oder nach der letzten Frage die meisten).</li>
-    </ol>`;
+  if (modal === 'rules') body = renderRules();
+  else if (modal === 'voice') body = renderVoiceModal();
   else if (modal === 'menu') body = `
     <h2>Menü</h2>
     <div class="menu-list">
+      <button class="btn ghost" data-act="open" data-modal="voice">Stimme &amp; Tempo</button>
+      <button class="btn ghost" data-act="help-toggle">Anfänger-Hilfe: ${S && S.settings.help ? 'an' : 'aus'}</button>
       <button class="btn ghost" data-act="skip-round">Runde abbrechen &amp; neue Frage</button>
       <button class="btn ghost" data-act="end-game">Spiel jetzt beenden</button>
       <button class="btn red" data-act="to-setup">Zurück zum Start (Spiel bleibt gespeichert)</button>
@@ -723,6 +830,127 @@ function renderModal() {
   else if (modal === 'questions') body = renderQuestionsModal();
   return `<div class="modal-bg" data-act="close-bg"><div class="modal" role="dialog">
     <button class="icon-btn close" data-act="close">✕</button>${body}</div></div>`;
+}
+
+const RULE_TABS = [
+  ['ablauf', 'So läuft’s'], ['poker', 'Poker-Basics'], ['zuege', 'Spielzüge'],
+  ['sidepot', 'All-in & Side-Pots'], ['tisch', 'Ohne Croupier'], ['chips', 'Chips aufteilen']
+];
+function renderRules() {
+  const n = S ? S.players.filter(inPlay).length : getPrefs().players.length;
+  const stack = S ? S.settings.startStack : getPrefs().startStack;
+  const R = {
+    ablauf: `
+      <p class="lead">Schätzpoker ist Poker – nur ohne Karten. Statt eines guten Blatts hast du eine <b>Schätzung</b>. Wer am Ende am nächsten an der richtigen Antwort liegt, gewinnt den Pot. Man muss die Antwort also nicht wissen: Man kann auch bluffen und die anderen zum Aussteigen bringen.</p>
+      <ol class="rules">
+        <li><b>Blinds:</b> Der Dealer-Button wandert eins weiter. Die zwei Spieler links davon zahlen Small und Big Blind.</li>
+        <li><b>Frage:</b> Die Seite stellt eine Schätzfrage. Jeder schreibt <b>eine Zahl</b> verdeckt auf. Danach wird nichts mehr geändert.</li>
+        <li><b>Setzrunde 1:</b> Beginnt links vom Big Blind.</li>
+        <li><b>Hinweis 1</b> → <b>Setzrunde 2</b> (beginnt links vom Dealer).</li>
+        <li><b>Hinweis 2</b> → <b>Setzrunde 3</b>.</li>
+        <li><b>Showdown:</b> Alle, die noch dabei sind, decken auf. Dann kommt die Lösung.</li>
+        <li><b>Gewinner:</b> Wer am nächsten dran ist – egal ob drüber oder drunter. Gleich nah = Pot wird geteilt.</li>
+        <li>Passen alle anderen, gewinnt der Letzte sofort, ohne seinen Zettel zu zeigen.</li>
+        <li>Wer keine Chips mehr hat, ist raus. Sieger ist, wer am Ende alle Chips hat (oder nach der letzten Frage die meisten).</li>
+      </ol>`,
+    poker: `
+      <h3>Ziel</h3><p>Chips gewinnen. Alles, was in einer Runde gesetzt wird, landet im <b>Pot</b> (der Topf in der Mitte). Der Pot geht an den Gewinner der Runde.</p>
+      <h3>Dealer-Button</h3><p>Ein Spieler hat den „Dealer“-Knopf. Er rückt jede Runde einen Platz im Uhrzeigersinn weiter. Er bestimmt, wer die Blinds zahlt und wer anfängt. Die Seite zeigt ihn mit <i class="m d">D</i> an.</p>
+      <h3>Blinds</h3><p>Pflichteinsätze, bevor überhaupt jemand etwas weiß. Der Spieler links vom Dealer zahlt den <b>Small Blind</b> (<i class="m sb">SB</i>), der nächste den <b>Big Blind</b> (<i class="m bb">BB</i>, doppelt so viel). Ohne Blinds könnte jeder immer passen, bis er die Antwort sicher weiß. Die Blinds steigen mit der Zeit, damit das Spiel ein Ende findet.</p>
+      <p>Bei nur noch <b>2 Spielern</b> zahlt der Dealer den Small Blind.</p>
+      <h3>Reihenfolge</h3><p>Es geht immer im Uhrzeigersinn. In <b>Setzrunde 1</b> beginnt der Spieler links vom Big Blind (die Blinds haben ja schon „gesetzt“). In <b>Setzrunde 2 und 3</b> beginnt der erste Spieler links vom Dealer, der noch dabei ist.</p>
+      <h3>Wann endet eine Setzrunde?</h3><p>Wenn jeder, der noch dabei ist, <b>gleich viel</b> gesetzt hat (oder All-in ist) und jeder mindestens einmal dran war. Erhöht jemand, sind alle anderen nochmal dran.</p>`,
+    zuege: `
+      <div class="moves">
+        <div><b>Checken</b><p>Nichts setzen und weitergeben. Geht nur, wenn in dieser Setzrunde noch niemand gesetzt hat (bzw. als Big Blind, wenn alle nur mitgegangen sind).</p></div>
+        <div><b>Setzen (Bet)</b><p>Den ersten Einsatz einer Setzrunde machen. Mindestens 1 Big Blind.</p></div>
+        <div><b>Mitgehen (Call)</b><p>So viel nachlegen, dass du genauso viel drin hast wie der höchste Einsatz.</p></div>
+        <div><b>Erhöhen (Raise)</b><p>Mehr setzen als der aktuelle Einsatz. Die Erhöhung muss mindestens so groß sein wie die letzte Erhöhung (am Anfang: 1 Big Blind). Beispiel: Einsatz 100 → mindestens auf 200 erhöhen. Jemand erhöht von 100 auf 300 → nächste Erhöhung mindestens auf 500.</p></div>
+        <div><b>Passen (Fold)</b><p>Aussteigen. Was du in dieser Runde schon gesetzt hast, bleibt im Pot. Dein Zettel zählt nicht mehr.</p></div>
+        <div><b>All-in</b><p>Alle deine Chips setzen. Du bleibst bis zum Ende im Spiel, kannst aber nur so viel gewinnen, wie du selbst eingesetzt hast (siehe Side-Pots).</p></div>
+      </div>
+      <h3>Tischregeln</h3>
+      <ul class="rules">
+        <li><b>Ansage gilt:</b> Wer laut „Mitgehen“ oder „Erhöhe auf 300“ sagt, muss es auch machen.</li>
+        <li><b>Ein Zug, ein Mal:</b> Chips auf einmal hinlegen. Erst 100 hinlegen und dann nochmal 200 nachschieben zählt nur als Mitgehen (kein „Nachlegen“).</li>
+        <li><b>Nicht vordrängeln:</b> Erst handeln, wenn du dran bist.</li>
+        <li><b>Zettel bleibt Zettel:</b> Nach dem Aufschreiben keine Änderung. Unleserlich oder zwei Zahlen = ungültig, der Spieler muss passen.</li>
+        <li><b>No-Limit:</b> Man darf jederzeit bis zu allen eigenen Chips setzen. Mehr als man vor sich hat, geht nicht (kein Geld nachkaufen während der Runde).</li>
+      </ul>`,
+    sidepot: `
+      <p>Wenn jemand <b>All-in</b> ist, aber andere mehr setzen, wird der Pot aufgeteilt. Grund: Du kannst von jedem Gegner nur so viel gewinnen, wie du selbst eingesetzt hast.</p>
+      <h3>Beispiel</h3>
+      <table class="ex"><thead><tr><th>Spieler</th><th>Eingesetzt</th></tr></thead><tbody>
+        <tr><td>Anna (All-in)</td><td>300</td></tr><tr><td>Ben (All-in)</td><td>600</td></tr><tr><td>Chris</td><td>1.000</td></tr></tbody></table>
+      <ol class="rules">
+        <li><b>Hauptpot:</b> 300 von jedem = <b>900</b>. Darum spielen alle drei.</li>
+        <li><b>Side-Pot:</b> von Ben und Chris je 300 mehr = <b>600</b>. Darum spielen nur Ben und Chris.</li>
+        <li><b>Rest:</b> Chris’ übrige 400 hat niemand mitgegangen → bekommt Chris zurück.</li>
+      </ol>
+      <p>Hat Anna die beste Schätzung, bekommt sie die 900. Den Side-Pot (600) bekommt, wer von Ben und Chris näher dran ist.</p>
+      <p>Chips von Spielern, die <b>gepasst</b> haben, bleiben trotzdem im jeweiligen Pot.</p>
+      <h3>Ihr müsst das nicht selbst rechnen</h3>
+      <p>Im <b>Chip-Modus</b> macht die Seite das automatisch. Im <b>Moderator-Modus</b> gibt es beim Aufdecken den <b>Pot-Rechner</b>: Einsatz pro Spieler eintragen, fertig.</p>`,
+    tisch: `
+      <p>Ohne Croupier braucht der Pot einen festen Verantwortlichen. So klappt’s ohne Streit:</p>
+      <ol class="rules">
+        <li><b>Der Dealer ist Pot-Verwalter.</b> Wer den Dealer-Button hat, kümmert sich in dieser Runde um den Pot. Er wechselt jede Runde – so ist keiner dauernd dran und jeder schaut mal.</li>
+        <li><b>Einsätze bleiben vor dir liegen,</b> bis die Setzrunde vorbei ist. So sieht jeder, wer wie viel gesetzt hat. Erst wenn alle gleich viel haben, schiebt der Dealer alles in die Mitte.</li>
+        <li><b>Laut ansagen:</b> „Ich gehe mit“, „Ich erhöhe auf 400“, „All-in“. Bei All-in zählt der Dealer die Chips laut nach.</li>
+        <li><b>All-in? Einsätze getrennt halten.</b> Am einfachsten: Der All-in-Spieler lässt seine Chips vor sich liegen, alles darüber hinaus kommt auf einen zweiten Haufen (Side-Pot). Oder ihr merkt euch die Gesamteinsätze und nutzt den Pot-Rechner.</li>
+        <li><b>Auszahlen:</b> Die Seite zeigt den Gewinner, der Dealer schiebt ihm den Pot. Bei Teilung: gleichmäßig aufteilen; ein übrig bleibender Chip geht an den ersten Gewinner links vom Dealer.</li>
+        <li><b>Wechselgeld:</b> Der Dealer wechselt große in kleine Chips aus dem Pot oder einer kleinen „Bank“ am Rand.</li>
+        <li><b>Bei Streit</b> entscheidet die Mehrheit am Tisch – oder ihr nutzt den Chip-Modus, dann zählt die Seite mit.</li>
+      </ol>`,
+    chips: `
+      <p>Startchips pro Spieler: <b>${fmt(stack)}</b>. Gute Aufteilung (mit Blinds 25/50 zum Start):</p>
+      ${chipTable(stack, n)}
+      <p class="sub small">Die Farben sind bei jedem Set anders – legt einfach fest, welche Farbe welchen Wert hat, und schreibt es auf einen Zettel in die Mitte.</p>
+      <h3>Wenn die Blinds hoch werden</h3>
+      <p>Die kleinsten Chips braucht ihr irgendwann nicht mehr. Dann <b>hochtauschen</b>: z. B. vier 25er gegen einen 100er.</p>`
+  };
+  return `
+    <h2>Spielregeln</h2>
+    <div class="tabs">${RULE_TABS.map(([k, l]) => `<button class="tab ${k === rulesTab ? 'on' : ''}" data-act="rules-tab" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div class="rules-body">${R[rulesTab] || R.ablauf}</div>`;
+}
+function chipTable(stack, n) {
+  // Aufteilung in 25er/50er/100er (+500er bei großen Stacks)
+  const plan = [];
+  let rest = stack;
+  const add = (v, c) => { c = Math.max(0, Math.min(c, Math.floor(rest / v))); if (c) { plan.push([v, c]); rest -= v * c; } };
+  if (stack >= 2000) add(500, Math.floor(stack / 2000));
+  add(25, 8); add(50, 6);
+  add(100, Math.floor(rest / 100));
+  if (rest > 0) add(25, Math.ceil(rest / 25));
+  plan.sort((a, b) => a[0] - b[0]);
+  return `<table class="ex"><thead><tr><th>Wert</th><th>pro Spieler</th><th>für ${n} Spieler</th></tr></thead><tbody>
+    ${plan.map(([v, c]) => `<tr><td>${fmt(v)}er</td><td>${c} Chips</td><td>${c * n} Chips</td></tr>`).join('')}
+    <tr class="sum"><td>Summe</td><td>${fmt(plan.reduce((s, [v, c]) => s + v * c, 0))}</td><td>${fmt(plan.reduce((s, [v, c]) => s + v * c, 0) * n)}</td></tr></tbody></table>`;
+}
+function renderVoiceModal() {
+  const pr = getPrefs();
+  const cur = bestVoice();
+  const supported = 'speechSynthesis' in window;
+  return `
+    <h2>Stimme &amp; Tempo</h2>
+    ${!supported ? '<p class="sub">Dieser Browser unterstützt keine Sprachausgabe.</p>' : `
+    <label>Stimme
+      <select data-voice>${voices.length ? voices.map((v) => `<option value="${esc(v.voiceURI)}" ${cur && v.voiceURI === cur.voiceURI ? 'selected' : ''}>${esc(voiceLabel(v))}</option>`).join('') : '<option>Keine deutsche Stimme gefunden</option>'}</select></label>
+    <label>Tempo: ${fmt(Number(pr.rate) || 1)}×
+      <input type="range" min="0.7" max="1.4" step="0.05" value="${Number(pr.rate) || 1}" data-rate></label>
+    <button class="btn gold" data-act="voice-test">▶ Probe hören</button>
+    <div class="voice-help">
+      <h3>So wird die Stimme viel besser</h3>
+      <p>Die Seite nutzt die Stimmen, die auf dem Gerät installiert sind. Standardmäßig sind die oft blechern – die guten muss man einmal laden:</p>
+      <ul class="rules">
+        <li><b>Mac:</b> Systemeinstellungen → Bedienungshilfen → Gesprochene Inhalte → Systemstimme → „Stimmen verwalten …“ → Deutsch → z. B. <b>Anna</b> oder <b>Petra</b> in der Version <b>„Premium“</b> bzw. <b>„Erweitert“</b> laden. Danach die Seite neu laden.</li>
+        <li><b>Microsoft Edge</b> (Windows &amp; Mac): bringt sehr natürliche Online-Stimmen mit, z. B. <b>„Katja Online (Natural)“</b> oder <b>„Conrad Online (Natural)“</b> – meist die beste Wahl.</li>
+        <li><b>Chrome:</b> „Google Deutsch“ ist okay.</li>
+        <li><b>iPhone/iPad:</b> Einstellungen → Bedienungshilfen → Gesprochene Inhalte → Stimmen → Deutsch → Premium-Stimme laden.</li>
+      </ul>
+      <p class="sub small">Stimmen mit ★ sind hochwertig und werden automatisch bevorzugt.</p>
+    </div>`}`;
 }
 
 function renderPlayersModal() {
@@ -787,7 +1015,7 @@ document.addEventListener('click', (e) => {
       startGame({
         mode: pr.mode, names, startStack: Math.max(1, Number(pr.startStack) || 1000), schedule,
         levelEvery: Math.max(1, Number(pr.levelEvery) || 3), rounds: Math.max(0, Number(pr.rounds) || 0),
-        timer: Math.max(0, Number(pr.timer) || 0), tts: !!pr.tts, builtin: !!pr.builtin
+        timer: Math.max(0, Number(pr.timer) || 0), tts: !!pr.tts, help: pr.help !== false, builtin: !!pr.builtin
       });
       break;
     }
@@ -808,6 +1036,11 @@ document.addEventListener('click', (e) => {
     }
     case 'preset': $('#raise-to').value = el.dataset.v; break;
     case 'swap': swapQuestion(); break;
+    case 'help-toggle': S.settings.help = !S.settings.help; save(); render(); break;
+    case 'rules-at': rulesTab = el.dataset.tab; modal = 'rules'; render(); break;
+    case 'rules-tab': rulesTab = el.dataset.tab; render(); document.querySelector('.modal')?.scrollTo(0, 0); break;
+    case 'voice-test': speak('Hallo und herzlich willkommen zum Schätzpoker! Die Blinds betragen fünfundzwanzig und fünfzig. Viel Glück!', true); break;
+    case 'potcalc': S.r.potCalc = !S.r.potCalc; save(); render(); break;
     case 'timer-start': startTimer(); break;
     case 'timer-stop': stopTimer(); render(); break;
     case 'tts':
@@ -853,12 +1086,15 @@ document.addEventListener('input', (e) => {
     pr[k] = t.type === 'checkbox' ? t.checked : (t.type === 'number' ? Number(t.value) : t.value);
     store(LS_PREFS, pr);
   } else if (t.dataset.est) { S.r.estimates[t.dataset.est] = parseNum(t.value); save(); }
+  else if (t.dataset.contrib) { S.r.contrib = S.r.contrib || {}; S.r.contrib[t.dataset.contrib] = parseNum(t.value); save(); }
   else if (t.dataset.pname) { byId(t.dataset.pname).name = t.value; save(); }
   else if (t.dataset.pstack) { const v = parseNum(t.value); if (!isNaN(v) && v >= 0) { byId(t.dataset.pstack).stack = Math.floor(v); save(); } }
 });
 document.addEventListener('change', (e) => {
   const t = e.target;
   if (t.dataset.pref === 'tts' || t.dataset.pref === 'builtin' || t.dataset.pref === 'startStack') render();
+  if (t.dataset.voice != null) { const pr = getPrefs(); pr.voice = t.value; store(LS_PREFS, pr); speak('So klinge ich.', true); }
+  if (t.dataset.rate != null) { const pr = getPrefs(); pr.rate = Number(t.value); store(LS_PREFS, pr); render(); speak('So schnell spreche ich jetzt.', true); }
   if (t.dataset.pname || t.dataset.pstack) render();
   if (t.matches('[data-import]') && t.files[0]) {
     t.files[0].text().then((txt) => {
@@ -888,8 +1124,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && modal) { modal = null; render(); return; }
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
   if (modal || !S || S.screen !== 'game') return;
-  if (e.key === 'Enter' && document.activeElement?.dataset.est != null) {
-    const all = [...document.querySelectorAll('[data-est]')];
+  if (e.key === 'Enter' && (document.activeElement?.dataset.est != null || document.activeElement?.dataset.contrib != null)) {
+    const all = [...document.querySelectorAll('[data-est],[data-contrib]')];
     const i = all.indexOf(document.activeElement);
     if (i < all.length - 1) { all[i + 1].focus(); e.preventDefault(); return; }
     e.preventDefault(); next(); return;
@@ -900,5 +1136,5 @@ document.addEventListener('keydown', (e) => {
   if ((e.key === 'z' && (e.ctrlKey || e.metaKey)) || e.key === 'Backspace') { e.preventDefault(); undo(); }
 });
 
-if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => {};
+if ('speechSynthesis' in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
 render();

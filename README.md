@@ -2,7 +2,7 @@
 
 Moderator-Webseite für einen Schätzpoker-Abend – Quiz trifft Poker, inspiriert von „Das Duell um die Geld“.
 
-**Spielen:** https://nisayera.github.io/schaetzpoker/
+**Spielen:** https://nisayera.github.io/duellumdiegeld/
 
 ## Ablauf einer Runde
 1. **Blinds** – Dealer-Button wandert weiter, Small & Big Blind werden angesagt (steigen automatisch).
@@ -16,8 +16,11 @@ Moderator-Webseite für einen Schätzpoker-Abend – Quiz trifft Poker, inspirie
 
 ## Features
 - 48 eingebaute Schätzfragen mit je 2 Hinweisen
+- Ausführliche Regeln: Poker-Basics, Spielzüge, Side-Pots, Spielen ohne Croupier, Chips aufteilen
+- Anfänger-Hilfe: kurze Erklärung bei jedem Schritt
+- Pot-Rechner im Moderator-Modus für All-ins und Side-Pots
 - Eigene Fragen hinzufügen, exportieren & importieren (werden im Browser gespeichert)
-- Sprachausgabe: die Seite liest Fragen & Hinweise vor
+- Sprachausgabe als Moderator – Stimme & Tempo wählbar, beste Stimme wird automatisch gewählt (Tipp: Microsoft Edge oder Premium-Stimmen am Mac)
 - Rückgängig-Funktion, Spielstand bleibt beim Neuladen erhalten
 - Bedienung per Leertaste – ideal für Fernseher/Beamer
 
