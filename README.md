@@ -15,7 +15,7 @@ Moderator-Webseite für einen Schätzpoker-Abend – Quiz trifft Poker, inspirie
 - **Mit digitalen Chips** – die Seite verwaltet zusätzlich Stacks, Einsätze und Pot (No-Limit, inkl. Side-Pots bei All-in).
 
 ## Features
-- 48 eingebaute Schätzfragen mit je 2 Hinweisen
+- 167 eingebaute Schätzfragen mit je 2 Hinweisen – überwiegend mit großen Zahlenbereichen (Höhen, Längen, Jahreszahlen, Rekorde, Kombinatorik)
 - Ausführliche Regeln: Poker-Basics, Spielzüge, Side-Pots, Spielen ohne Croupier, Chips aufteilen
 - Anfänger-Hilfe: kurze Erklärung bei jedem Schritt
 - Pot-Rechner im Moderator-Modus für All-ins und Side-Pots
