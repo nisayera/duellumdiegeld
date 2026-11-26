@@ -31,6 +31,7 @@ const DEFAULT_PREFS = {
   voice: '',
   rate: 1,
   help: true,
+  remote: true,
   builtin: true
 };
 
@@ -50,7 +51,8 @@ const ICON = {
   soundOff: svg('<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6"/><path d="m22 9-5 6"/>'),
   full: svg('<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>'),
   menu: svg('<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>'),
-  close: svg('<path d="M6 6l12 12"/><path d="M18 6 6 18"/>')
+  close: svg('<path d="M6 6l12 12"/><path d="M18 6 6 18"/>'),
+  phone: svg('<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>')
 };
 
 /* ---------- Helfer ---------- */
@@ -154,7 +156,10 @@ function beep(freq = 880, dur = 0.18, times = 1) {
 }
 
 /* ---------- Zustand speichern / Undo ---------- */
-function save() { if (S) store(LS_STATE, S); else localStorage.removeItem(LS_STATE); }
+function save() {
+  if (S) store(LS_STATE, S); else localStorage.removeItem(LS_STATE);
+  if (window.Remote) Remote.broadcast();
+}
 function snap() { history.push(JSON.stringify(S)); if (history.length > 80) history.shift(); }
 function undo() {
   if (!history.length) return;
@@ -186,7 +191,7 @@ function startGame(cfg) {
     screen: 'game',
     settings: {
       mode: cfg.mode, startStack: cfg.startStack, schedule: cfg.schedule, levelEvery: cfg.levelEvery,
-      rounds: cfg.rounds, timer: cfg.timer, tts: cfg.tts, help: cfg.help
+      rounds: cfg.rounds, timer: cfg.timer, tts: cfg.tts, help: cfg.help, remote: cfg.remote
     },
     players: cfg.names.map((n, i) => ({ id: 'p' + i, name: n, stack: cfg.mode === 'chips' ? cfg.startStack : 0, out: false })),
     nextId: cfg.names.length,
@@ -448,6 +453,7 @@ function swapQuestion() {
   snap();
   if (S.deckPos >= S.deck.length) { S.deck = shuffle(S.deck); S.deckPos = 0; }
   S.r.q = S.deck[S.deckPos++];
+  S.r.estimates = {};
   save(); render(); announce();
 }
 
@@ -493,6 +499,7 @@ function renderNow() {
   else app.innerHTML = renderGame();
   const wasOpen = !!$('#modal-root').firstElementChild;
   $('#modal-root').innerHTML = modal ? renderModal() : '';
+  if (S && S.screen !== 'setup' && window.Remote) Remote.start();
   document.body.classList.toggle('has-modal', !!modal);
   if (modal) {
     if (!wasOpen) lastFocus = focusKey(prevActive);
@@ -602,6 +609,7 @@ function renderSetup() {
         <input type="number" min="0" step="5" value="${pr.timer}" data-pref="timer"></label>
       <div class="check-row full"><label class="check"><input type="checkbox" ${pr.tts ? 'checked' : ''} data-pref="tts"> Sprachausgabe – die Seite moderiert laut</label>
         <button class="btn ghost sm" data-act="open" data-modal="voice">Stimme wählen</button></div>
+      <label class="check"><input type="checkbox" ${pr.remote !== false ? 'checked' : ''} data-pref="remote"> Handys erlauben – jeder tritt per QR-Code bei, setzt und schätzt am eigenen Handy</label>
       <label class="check"><input type="checkbox" ${pr.help !== false ? 'checked' : ''} data-pref="help"> Anfänger-Hilfe – kurze Erklärung bei jedem Schritt</label>
       <label class="check"><input type="checkbox" ${pr.builtin ? 'checked' : ''} data-pref="builtin"> Eingebaute Fragen verwenden (${(window.BUILTIN_QUESTIONS || []).length})</label>
     </section>
@@ -648,6 +656,7 @@ function renderGame() {
       </div>
       <nav aria-label="Spielsteuerung">
         <button class="icon-btn" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" data-act="undo" ${history.length ? '' : 'disabled'}>${ICON.undo}</button>
+        <button class="icon-btn" title="Handys verbinden" aria-label="Handys verbinden" data-act="open" data-modal="remote">${ICON.phone}${window.Remote ? Remote.badge() : ''}</button>
         <button class="icon-btn" title="Spieler" aria-label="Spieler verwalten" data-act="open" data-modal="players">${ICON.players}</button>
         <button class="icon-btn" title="Regeln" aria-label="Spielregeln" data-act="open" data-modal="rules">${ICON.rules}</button>
         <button class="icon-btn" title="Sprachausgabe" aria-label="Sprachausgabe" aria-pressed="${!!S.settings.tts}" data-act="tts">${S.settings.tts ? ICON.soundOn : ICON.soundOff}</button>
@@ -703,7 +712,8 @@ function stageContent() {
     case 'question':
       return `
         ${questionBlock(false)}
-        <p class="write-note">Jeder schreibt seine Schätzung <b>verdeckt</b> auf.</p>
+        <p class="write-note">Jeder schreibt seine Schätzung <b>verdeckt</b> auf${window.Remote && Remote.linkedCount() ? ' – oder tippt sie ins Handy' : ''}.</p>
+        ${estProgress()}
         <div class="tools">
           ${timer.int ? `<div class="timer-wrap"><span class="timer-dial" style="--p:${timer.left / (timer.total || timer.left || 1)}" aria-hidden="true"></span><span id="timer" class="timer ${timer.left <= 10 ? 'urgent' : ''}" role="timer" aria-label="Sekunden übrig">${timer.left}</span><button class="btn ghost sm" data-act="timer-stop">Stopp</button></div>`
             : `<button class="btn ghost" data-act="timer-start">Timer starten (${S.settings.timer || 60} s)</button>`}
@@ -874,6 +884,18 @@ function renderResult() {
     </div>`;
 }
 
+function estProgress() {
+  if (!window.Remote || !Remote.linkedCount()) return '';
+  const act = S.players.filter((p) => !p.out);
+  const done = act.filter((p) => { const e = S.r.estimates[p.id]; return e != null && !isNaN(e); });
+  return `<div class="est-progress"><b>${done.length} / ${act.length}</b> Schätzungen per Handy abgegeben${done.length < act.length ? ` · fehlt noch: ${act.filter((p) => !done.includes(p)).map((p) => esc(p.name)).join(', ')}` : ' ✓'}</div>`;
+}
+function estMark(p) {
+  const ph = S.r.phase;
+  if (!['question', 'bet0', 'hint1', 'bet1', 'hint2', 'bet2'].includes(ph)) return '';
+  const e = S.r.estimates[p.id];
+  return e != null && !isNaN(e) ? '<i class="m ok" title="Schätzung abgegeben">✓</i>' : '';
+}
 function renderTable() {
   const r = S.r; const n = S.players.length;
   // Plätze im Uhrzeigersinn um einen ovalen Tisch, Platz 1 oben
@@ -893,7 +915,7 @@ function renderTable() {
     return `
       <li class="seat-spot ${p.out ? 'out' : ''} ${h && h.folded ? 'folded' : ''} ${turn ? 'turn' : ''}" style="${at(i, 1)}" data-pid="${p.id}" ${turn ? 'aria-current="true"' : ''}>
         <span class="seat-anchor" aria-hidden="true"></span>
-        <div class="pn"><span class="nm">${esc(p.name)}</span>${marks}</div>
+        <div class="pn"><span class="nm">${esc(p.name)}</span>${marks}${window.Remote && Remote.isLinked(p.id) ? `<i class="m ph" title="Handy verbunden" aria-label="Handy verbunden">${ICON.phone}</i>` : ''}${estMark(p)}</div>
         ${isChips() && !p.out ? `<div class="pv"><span class="stack" data-tween="stack-${p.id}" data-value="${p.stack}" data-delay="${r.result ? 2600 : 0}">${fmt(p.stack)}</span></div>` : ''}
         ${status ? `<div class="st">${status}</div>` : ''}
         ${i === S.dealer ? '<span class="sr">Dealer</span>' : ''}
@@ -954,6 +976,7 @@ function renderModal() {
     </div>
     <p class="sub small">Hinweis: „Runde abbrechen“ gibt im Chip-Modus alle Einsätze dieser Runde zurück.</p>`;
   else if (modal === 'players') body = renderPlayersModal();
+  else if (modal === 'remote') body = window.Remote ? Remote.renderModal() : '';
   else if (modal === 'questions') body = renderQuestionsModal();
   return `<div class="modal-bg" data-act="close-bg"><div class="modal modal-${esc(modal)}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
     <button class="icon-btn close" data-act="close" aria-label="Schließen">${ICON.close}</button>${body.replace('<h2>', '<h2 id="modal-title">')}</div></div>`;
@@ -1175,7 +1198,7 @@ document.addEventListener('click', (e) => {
       startGame({
         mode: pr.mode, names, startStack: Math.max(1, Number(pr.startStack) || 1000), schedule,
         levelEvery: Math.max(1, Number(pr.levelEvery) || 3), rounds: Math.max(0, Number(pr.rounds) || 0),
-        timer: Math.max(0, Number(pr.timer) || 0), tts: !!pr.tts, help: pr.help !== false, builtin: !!pr.builtin
+        timer: Math.max(0, Number(pr.timer) || 0), tts: !!pr.tts, help: pr.help !== false, remote: pr.remote !== false, builtin: !!pr.builtin
       });
       break;
     }
@@ -1219,8 +1242,9 @@ document.addEventListener('click', (e) => {
       modal = null; newRound(); break;
     }
     case 'end-game': snap(); modal = null; endGame(); break;
-    case 'to-setup': modal = null; S = null; history = []; render(); break;
-    case 'new-game': localStorage.removeItem(LS_STATE); S = null; history = []; render(); break;
+    case 'to-setup': modal = null; if (window.Remote) Remote.destroy(); S = null; history = []; render(); break;
+    case 'new-game': localStorage.removeItem(LS_STATE); if (window.Remote) Remote.destroy(); S = null; history = []; render(); break;
+    default: if (window.Remote) Remote.onClick(a, el);
     case 'toggle-out': { snap(); const p = byId(el.dataset.id); p.out = !p.out; if (!p.out && isChips() && p.stack <= 0) p.stack = S.settings.startStack; save(); render(); break; }
     case 'add-live-player': {
       const inp = $('#new-player'); const n = inp.value.trim(); if (!n) return;
